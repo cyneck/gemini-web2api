@@ -23,13 +23,15 @@ DEFAULT_CONFIG = {
 CONFIG = dict(DEFAULT_CONFIG)
 
 _CONFIG_PATH = None
+_CONFIG_DIR = None
 
 
 def load_config(path: str = None):
     """Load config from JSON file."""
-    global _CONFIG_PATH
+    global _CONFIG_PATH, _CONFIG_DIR
     if path and os.path.exists(path):
         _CONFIG_PATH = path
+        _CONFIG_DIR = os.path.dirname(os.path.abspath(path))
         with open(path) as f:
             CONFIG.update(json.load(f))
     return CONFIG
@@ -38,6 +40,19 @@ def load_config(path: str = None):
 def config_path() -> str:
     """Return the path of the loaded config file (None if defaults only)."""
     return _CONFIG_PATH
+
+
+def resolve_path(p: str = None) -> str:
+    """Resolve a possibly relative path against the config file's directory.
+
+    Without this, a relative "cookie.txt" resolves against the shell's cwd,
+    so the service finds different files depending on where it was started.
+    """
+    if not p:
+        return None
+    if os.path.isabs(p):
+        return p
+    return os.path.join(_CONFIG_DIR or os.getcwd(), p)
 
 
 def save_config() -> str:

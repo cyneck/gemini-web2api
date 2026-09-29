@@ -10,7 +10,7 @@ import re
 import time
 import urllib.error
 
-from .config import CONFIG, save_config, config_path
+from .config import CONFIG, save_config, config_path, resolve_path
 from .models import MODELS, resolve_model
 from .gemini import generate, load_cookie, HAS_HTTPX
 from . import __version__
@@ -81,7 +81,7 @@ def _mask_hint(cookie_str: str) -> str:
 
 
 def _cookie_file_path() -> str:
-    return CONFIG.get("cookie_file") or "cookie.txt"
+    return resolve_path(CONFIG.get("cookie_file") or "cookie.txt")
 
 
 def _cookie_state() -> dict:
@@ -251,7 +251,7 @@ def _api_cookie_save(handler):
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(parsed["cookie_str"] + "\n")
-    if CONFIG.get("cookie_file") != path:
+    if not CONFIG.get("cookie_file"):
         CONFIG["cookie_file"] = path
         try:
             save_config()
