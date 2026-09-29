@@ -36,14 +36,103 @@ const LOOKUP_URLS = [
   "https://google.com/"
 ];
 
+// The server keeps one account per Google account, and rejects a cookie that is
+// missing any of these. Check them up front so a rejection explains itself.
+const SERVER_REQUIRED = ["SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID"];
+
+const DEFAULT_SERVER = "http://127.0.0.1:8081";
+
 const statusEl = document.getElementById("status");
 const exportButton = document.getElementById("export");
 const inspectButton = document.getElementById("inspect");
 const openButton = document.getElementById("open");
+const pushButton = document.getElementById("push");
+const serverInput = document.getElementById("server");
+const apikeyInput = document.getElementById("apikey");
 
 function setStatus(message, kind = "") {
   statusEl.textContent = message;
   statusEl.className = kind;
+}
+
+function loadPrefs() {
+  let server = DEFAULT_SERVER;
+  let apikey = "";
+  try {
+    server = localStorage.getItem("gw2a_server") || DEFAULT_SERVER;
+    apikey = localStorage.getItem("gw2a_apikey") || "";
+  } catch {
+    // Storage can be unavailable in some privacy modes; defaults still work.
+  }
+  serverInput.value = server;
+  apikeyInput.value = apikey;
+}
+
+function savePrefs() {
+  try {
+    localStorage.setItem("gw2a_server", serverInput.value.trim());
+    localStorage.setItem("gw2a_apikey", apikeyInput.value.trim());
+  } catch {
+    // Non-fatal: the sync itself does not depend on remembering these.
+  }
+}
+
+function serverBaseUrl() {
+  const raw = (serverInput.value || "").trim() || DEFAULT_SERVER;
+  if (!/^https?:\/\//i.test(raw)) {
+    throw new Error("Server address must start with http:// or https://");
+  }
+  return raw.replace(/\/+$/, "");
+}
+
+function requestHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  const key = (apikeyInput.value || "").trim();
+  if (key) headers.Authorization = "Bearer " + key;
+  return headers;
+}
+
+function normalizeUser(value) {
+  return value === null || value === undefined || value === "" ? "" : String(value);
+}
+
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: requestHeaders(),
+    body: JSON.stringify(body)
+  });
+
+  if (response.status === 401) {
+    throw new Error("The server rejected the request (401). Fill in the API key above, "
+      + "or clear api_keys in the server config.");
+  }
+
+  const text = await response.text();
+  let data = {};
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = {};
+  }
+  if (!response.ok) {
+    throw new Error(data.error || `Server responded ${response.status}`);
+  }
+  return data;
+}
+
+async function findAccountIdx(baseUrl, authUser) {
+  // Reuse the account with the same /u/N instead of piling up duplicates.
+  try {
+    const response = await fetch(`${baseUrl}/api/accounts`, { headers: requestHeaders() });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const match = (data.accounts || [])
+      .find((account) => normalizeUser(account.auth_user) === normalizeUser(authUser));
+    return match ? match.idx : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeDomain(domain = "") {
@@ -349,8 +438,86 @@ async function downloadJson(filename, payload) {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
+async function pushSession() {
+  savePrefs();
+  const baseUrl = serverBaseUrl();
+  const info = await buildInspection();
+
+  if (!info.validation.valid) {
+    throw new Error(inspectionMessage(info));
+  }
+
+  const missingForServer = SERVER_REQUIRED.filter((name) => !info.selected.has(name));
+  if (missingForServer.length > 0) {
+    throw new Error(
+      "The server needs these cookies but the browser does not expose them: "
+      + missingForServer.join(", ")
+      + ".\nSign in on gemini.google.com in a normal (not incognito) window, refresh, then sync again."
+    );
+  }
+
+  const body = {
+    auth_user: info.authUser ?? "",
+    label: "",
+    cookie: buildCookieString(info),
+    enabled: true
+  };
+
+  // XSRF is optional: requests work without it, so never block a sync on it.
+  if (info.pageMetadata.xsrfToken) {
+    body.xsrf = info.pageMetadata.xsrfToken;
+  }
+
+  const idx = await findAccountIdx(baseUrl, info.authUser);
+  if (idx !== null) body.idx = idx;
+
+  const saved = await postJson(`${baseUrl}/api/accounts`, body);
+
+  let blNote = "";
+  if (info.pageMetadata.geminiBl) {
+    try {
+      await postJson(`${baseUrl}/api/config`, { gemini_bl: info.pageMetadata.geminiBl });
+      blNote = "\ngemini_bl: updated";
+    } catch {
+      blNote = "\ngemini_bl: server refused it (not critical)";
+    }
+  } else {
+    blNote = "\ngemini_bl: not visible on the page (not critical)";
+  }
+
+  return {
+    idx: saved.idx ?? idx,
+    created: idx === null,
+    authUser: info.authUser,
+    xsrf: Boolean(info.pageMetadata.xsrfToken),
+    blNote
+  };
+}
+
 openButton.addEventListener("click", async () => {
   await chrome.tabs.create({ url: "https://gemini.google.com/app" });
+});
+
+pushButton.addEventListener("click", async () => {
+  pushButton.disabled = true;
+  setStatus("Reading the session and pushing it to the server…");
+
+  try {
+    const result = await pushSession();
+    const action = result.created ? "Added a new account" : `Updated account #${result.idx}`;
+    setStatus(
+      `${action} on ${serverBaseUrl()}\n` +
+      `auth_user: ${result.authUser ?? "default"}\n` +
+      `cookie: saved\n` +
+      `xsrf: ${result.xsrf ? "saved" : "not found (optional — open Gemini, refresh, then sync again)"}` +
+      result.blNote,
+      result.xsrf ? "ok" : "warn"
+    );
+  } catch (error) {
+    setStatus(error?.message || String(error), "warn");
+  } finally {
+    pushButton.disabled = false;
+  }
 });
 
 inspectButton.addEventListener("click", async () => {
@@ -406,3 +573,7 @@ exportButton.addEventListener("click", async () => {
     exportButton.disabled = false;
   }
 });
+
+serverInput.addEventListener("change", savePrefs);
+apikeyInput.addEventListener("change", savePrefs);
+loadPrefs();

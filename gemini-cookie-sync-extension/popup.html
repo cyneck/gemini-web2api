@@ -16,6 +16,23 @@
     }
     h1 { font-size: 17px; margin: 0 0 8px; }
     p { font-size: 13px; line-height: 1.55; margin: 8px 0; }
+    label {
+      display: block;
+      font-size: 12px;
+      margin-top: 12px;
+      opacity: .85;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 4px;
+      padding: 7px 9px;
+      border: 1px solid color-mix(in srgb, CanvasText 22%, Canvas);
+      border-radius: 8px;
+      background: Canvas;
+      color: CanvasText;
+      font-size: 13px;
+    }
     button {
       width: 100%;
       padding: 10px 12px;
@@ -26,6 +43,7 @@
       font-size: 14px;
     }
     button:disabled { opacity: .55; cursor: wait; }
+    #push { background: #1769e0; color: white; }
     #export { background: #1769e0; color: white; }
     #inspect, #open { background: color-mix(in srgb, CanvasText 10%, Canvas); color: CanvasText; }
     #status {
@@ -42,16 +60,31 @@
     .ok { color: #17823b; }
     code { direction: ltr; unicode-bidi: embed; }
     .note { opacity: .78; }
+    details { margin-top: 12px; font-size: 13px; }
+    summary { cursor: pointer; opacity: .85; }
   </style>
 </head>
 <body>
   <h1>Gemini Cookie Sync</h1>
-  <p>Exports cookies, XSRF, and build metadata from the current Gemini session to <code>gemini-auth.json</code>. Nothing is sent over the network.</p>
+  <p>Reads the signed-in Gemini session and pushes cookies plus XSRF straight into your local gemini-web2api server. No file to copy by hand.</p>
+
+  <label for="server">Local server</label>
+  <input id="server" type="text" placeholder="http://127.0.0.1:8081" spellcheck="false">
+
+  <label for="apikey">API key <span class="note">(only if the server set api_keys)</span></label>
+  <input id="apikey" type="text" placeholder="leave empty when api_keys is empty" spellcheck="false">
+
   <button id="open" type="button">Open Gemini</button>
+  <button id="push" type="button">Sync to local server</button>
   <button id="inspect" type="button">Inspect session</button>
-  <button id="export" type="button">Export gemini-auth.json</button>
+
+  <details>
+    <summary>More</summary>
+    <button id="export" type="button">Download gemini-auth.json</button>
+  </details>
+
   <p id="status">Ready.</p>
-  <p class="note">Open Gemini, sign in, then refresh the page before inspection. The generated file contains highly sensitive session data; do not share it or commit it to Git.</p>
+  <p class="note">Open Gemini, sign in, then refresh the page before syncing. The account is matched by its <code>/u/N</code> index, so a tab on <code>/u/1</code> updates account 1. The session data never leaves this machine.</p>
   <script src="popup.js"></script>
 </body>
 </html>

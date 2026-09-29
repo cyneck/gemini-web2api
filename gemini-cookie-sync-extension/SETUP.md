@@ -1,108 +1,73 @@
 # Gemini Cookie Sync Setup
 
-Short guide for extracting fresh Gemini auth data and applying it to `gemini-web2api`.
+Short guide for getting a signed-in Gemini session into `gemini-web2api`.
 
-## What this extension exports
+## Why an extension and not an iframe
 
-The extension reads the current signed-in Gemini session and exports:
+A web page cannot read these cookies, so the console can never grab them on its own:
 
-- Google session cookies
-- `SAPISID`
-- `SNlM0e` (`xsrf_token`)
-- `cfb2h` (`gemini_bl`)
-- `auth_user`
+- `gemini.google.com` answers `X-Frame-Options: DENY`, so it refuses to be embedded.
+- Even if it could be embedded, the same-origin policy blocks a page on `127.0.0.1`
+  from reading anything inside it.
+- The session cookies are `HttpOnly`, so no page script can touch them either.
 
-It saves them locally as `gemini-auth.json`.
+An extension is different: `chrome.cookies` is a privileged browser API that **can**
+read `HttpOnly` cookies. That is the only clean way to automate this.
 
-## Install and export
+## Install
 
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
 3. Click **Load unpacked**
 4. Select the `gemini-cookie-sync-extension` folder
-5. Open [https://gemini.google.com/app](https://gemini.google.com/app)
-6. Sign in and refresh the page
-7. Open the extension and click **Inspect session**
-8. Confirm the session looks ready
-9. Click **Export gemini-auth.json**
 
-Expected ready state:
+## One-click sync (recommended)
 
-```text
-XSRF / SNlM0e: present
-gemini_bl / cfb2h: present
-Session and XSRF are ready for export.
-```
+1. Start `gemini-web2api` and open its console at `http://127.0.0.1:8081/ui`
+2. In Chrome, open [https://gemini.google.com/app](https://gemini.google.com/app),
+   sign in, and refresh the page
+3. Open the extension popup
+4. Check **Local server** (defaults to `http://127.0.0.1:8081`); fill in **API key**
+   only if the server has `api_keys` set
+5. Click **Sync to local server**
 
-## Apply it in `gemini-web2api`
+That is it. The cookie is written to disk and the account entry is created or updated.
+Reload the console to see the new state.
 
-Move the exported file into the project:
+### How accounts are matched
 
-```bash
-cd /path/to/gemini-web2api
+One Google account = one entry, keyed by its `/u/N` index:
 
-WIN_HOME=$(wslpath "$(powershell.exe -NoProfile -Command '[Environment]::GetFolderPath(\"UserProfile\")' | tr -d '\r')")
-cp "$WIN_HOME/Downloads/gemini-auth.json" ./gemini-auth.json
-chmod 600 gemini-auth.json
-```
+- If the Gemini tab is on `/u/1`, the sync updates the account whose `auth_user` is `1`.
+- No match yet? A new account is created.
+- Single account with no `/u/N` in the URL? It reuses the default account (`auth_user` empty).
 
-Update `config.json`:
+So syncing repeatedly does **not** pile up duplicates.
 
-```bash
-cd /path/to/gemini-web2api
+### What it sends
 
-AUTH_FILE="$(pwd)/gemini-auth.json"
-tmp=$(mktemp)
+- `cookie`: the session cookies the server requires
+- `xsrf`: `SNlM0e` when the page exposes it. **Optional** — requests work without it,
+  so a sync never fails just because XSRF is missing.
+- `gemini_bl`: applied separately when the page exposes `cfb2h`
 
-jq \
-  --arg auth_file "$AUTH_FILE" \
-  --slurpfile auth "$AUTH_FILE" \
-  '
-    .cookie_file = $auth_file
-    | .auth_user = $auth[0].auth_user
-    | .xsrf_token = $auth[0].xsrf_token
-    | if (($auth[0].gemini_bl // "") | length) > 0
-      then .gemini_bl = $auth[0].gemini_bl
-      else .
-      end
-  ' config.json > "$tmp" &&
-mv "$tmp" config.json
+## Manual paste (fallback)
 
-chmod 600 config.json
-```
+If you would rather not install the extension, the console accepts a paste instead:
 
-Quick check:
+1. Open `gemini.google.com`, press `F12`, go to **Application** → **Cookies**
+2. Copy the whole cookie string and paste it into the account's cookie box
+3. Click **Parse and save cookie**
 
-```bash
-jq '{
-  cookie_file,
-  auth_user,
-  xsrf_token_set: ((.xsrf_token // "") | length > 0),
-  gemini_bl_set: ((.gemini_bl // "") | length > 0)
-}' config.json
-```
+`xsrf_token` is a separate box: press `Ctrl+U`, copy the entire page source, paste it
+there, and click **Parse and save xsrf**. The console extracts `SNlM0e` for you.
 
-## Restart and test
+## Multiple accounts
 
-```bash
-systemctl --user restart gemini-proxy
-```
-
-```bash
-curl -sS http://127.0.0.1:10012/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_KEY" \
-  -d '{
-    "model": "gemini-3.1-pro",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Reply exactly with: authenticated-ok"
-      }
-    ]
-  }' | jq
-```
+Sign in to each Google account in its own tab, note the `/u/0`, `/u/1`, ... in the URL,
+and sync once per tab. Requests that come back as `400/401/403/429` automatically fail
+over to the next enabled account.
 
 ## Keep it secret
 
-`gemini-auth.json` contains a real Google session. Do not share it, print it, or commit it to Git.
+The exported session is a real Google login. Do not share it, print it, or commit it to Git.
