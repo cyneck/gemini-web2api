@@ -48,6 +48,10 @@ def _upload_images(images: list) -> list:
 
 class GeminiHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
+        # Skip console's own traffic: /ui page loads and /api/* polling would
+        # otherwise spam the log panel with a new line every few seconds.
+        if self.path.startswith("/api/") or self.path.startswith("/ui"):
+            return
         client_ip = self.client_address[0] if self.client_address else "-"
         log(f"{client_ip} {fmt % args}")
 

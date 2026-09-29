@@ -1,6 +1,7 @@
 """Gemini StreamGenerate protocol implementation with httpx streaming."""
 import json
 import time
+from collections import deque
 import uuid
 import re
 import urllib.request
@@ -23,11 +24,38 @@ _cookie_cache = {"str": "", "sapisid": None, "mtime": 0}
 _httpx_client = None
 
 
+LOG_BUFFER_SIZE = 500
+_log_buffer = deque(maxlen=LOG_BUFFER_SIZE)
+_log_seq = 0
+_ERROR_HINTS = ("error", "failed", "retry", "barderrorinfo", "rejected",
+                "traceback", "falling back", "timed out")
+
+
 def log(msg: str):
+    """Record a log line in the in-memory ring buffer (for /ui) and stderr."""
+    global _log_seq
+    _log_seq += 1
+    lowered = msg.lower()
+    level = "error" if any(h in lowered for h in _ERROR_HINTS) else "info"
+    _log_buffer.append({"seq": _log_seq, "t": time.strftime('%H:%M:%S'),
+                        "level": level, "msg": msg})
     if CONFIG["log_requests"]:
         import sys
         sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
         sys.stderr.flush()
+
+
+def get_logs(since: int = 0) -> list:
+    """Return buffered log entries newer than `since`, plus the latest seq."""
+    return [e for e in _log_buffer if e["seq"] > since]
+
+
+def latest_log_seq() -> int:
+    return _log_seq if _log_seq else (_log_buffer[-1]["seq"] if _log_buffer else 0)
+
+
+def clear_logs():
+    _log_buffer.clear()
 
 
 def _get_ssl_ctx():

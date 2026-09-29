@@ -108,6 +108,7 @@ def handle_api(handler, method: str, path: str) -> bool:
         return False
     routes = {
         ("GET", "/api/status"): _api_status,
+        ("GET", "/api/logs"): _api_logs,
         ("POST", "/api/config"): _api_config,
         ("POST", "/api/cookie/validate"): _api_cookie_validate,
         ("POST", "/api/cookie"): _api_cookie_save,
@@ -115,6 +116,9 @@ def handle_api(handler, method: str, path: str) -> bool:
     }
     if method == "DELETE" and path == "/api/cookie":
         _api_cookie_clear(handler)
+        return True
+    if method == "DELETE" and path == "/api/logs":
+        _api_logs_clear(handler)
         return True
     fn = routes.get((method, path))
     if fn is None:
@@ -216,6 +220,23 @@ def _try_generate(cookie_str=None, sapisid=None, model="gemini-3.5-flash"):
     if not text or not text.strip():
         return False, "Gemini 返回了空内容（可能被限流或触发风控）", ""
     return True, f"验证成功，延迟 {latency} ms", text.strip()
+
+
+def _api_logs(handler):
+    import urllib.parse
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query)
+    try:
+        since = int(qs.get("since", ["0"])[0])
+    except (TypeError, ValueError, IndexError):
+        since = 0
+    from .gemini import get_logs, latest_log_seq
+    handler.send_json({"logs": get_logs(since), "seq": latest_log_seq()})
+
+
+def _api_logs_clear(handler):
+    from .gemini import clear_logs
+    clear_logs()
+    handler.send_json({"ok": True})
 
 
 def _api_cookie_validate(handler):
@@ -372,6 +393,13 @@ PAGE_HTML = r"""<!DOCTYPE html>
            font-size: 14px; display: none; z-index: 99; box-shadow: 0 4px 12px rgba(0,0,0,.3); }
   .client-block { margin-top: 12px; }
   .client-block .t { font-size: 13px; font-weight: 600; color: #334155; }
+  .log-box { background: #0f172a; color: #cbd5e1; border-radius: 8px; padding: 10px 12px;
+             margin-top: 10px; max-height: 320px; overflow-y: auto;
+             font-family: Consolas, "Courier New", monospace; font-size: 12.5px; line-height: 1.5; }
+  .log-line { white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
+  .log-line .t { color: #64748b; margin-right: 6px; }
+  .log-line.lv-error { color: #fca5a5; }
+  .log-box .empty { color: #64748b; }
 </style>
 </head>
 <body>
@@ -442,6 +470,19 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div style="display:flex;align-items:flex-end"><button class="btn btn-primary" id="btn-test" style="width:100%">发送测试请求</button></div>
     </div>
     <div class="result" id="ts-result"></div>
+  </section>
+
+  <section class="card">
+    <h2>📜 运行日志 <span class="badge b-gray" id="log-count">0 条</span></h2>
+    <p class="hint">服务端最近 500 条日志（请求、重试、BL 自动更新、错误），排障直接看这里。</p>
+    <div style="display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:6px;margin:0">
+        <input type="checkbox" id="log-auto" checked> 每 2 秒自动刷新
+      </label>
+      <button class="btn btn-ghost" id="btn-log-refresh" style="padding:5px 14px">立即刷新</button>
+      <button class="btn btn-danger" id="btn-log-clear" style="padding:5px 14px">清空</button>
+    </div>
+    <div id="log-box" class="log-box"><div class="empty">（暂无日志，发一次请求试试）</div></div>
   </section>
 
   <section class="card">
@@ -634,7 +675,38 @@ gemini</code></pre></div>`,
   $('client-body').innerHTML = blocks[curTab];
 }
 
-loadStatus();
+// ── logs ──
+let logSeq = 0;
+function appendLog(e) {
+  const box = $('log-box'); if (!box) return;
+  const empty = box.querySelector('.empty'); if (empty) empty.remove();
+  const d = document.createElement('div');
+  d.className = 'log-line lv-' + (e.level || 'info');
+  d.innerHTML = `<span class="t">[${esc(e.t)}]</span>${esc(e.msg)}`;
+  box.appendChild(d);
+  while (box.children.length > 500) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+  $('log-count').textContent = box.children.length + ' 条';
+}
+async function pollLogs() {
+  try {
+    const r = await api('/api/logs?since=' + logSeq);
+    (r.logs || []).forEach(appendLog);
+    if (r.seq > logSeq) logSeq = r.seq;
+  } catch (e) { /* unauthorized: stay quiet, config cards still work */ }
+}
+$('btn-log-refresh').onclick = pollLogs;
+$('btn-log-clear').onclick = async () => {
+  try {
+    await api('/api/logs', {method: 'DELETE'});
+    $('log-box').innerHTML = '<div class="empty">（已清空，等待新日志…）</div>';
+    $('log-count').textContent = '0 条';
+    toast('日志已清空');
+  } catch (e) { toast('清空失败：' + e.message); }
+};
+setInterval(() => { if ($('log-auto').checked) pollLogs(); }, 2000);
+
+loadStatus().then(pollLogs);
 </script>
 </body>
 </html>
