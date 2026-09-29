@@ -10,7 +10,7 @@ import re
 import time
 import urllib.error
 
-from .config import CONFIG, save_config, config_path, resolve_path
+from .config import CONFIG, save_config, config_path, resolve_path, get_accounts, get_account
 from .models import MODELS, resolve_model
 from .gemini import generate, load_cookie, HAS_HTTPX
 from . import __version__
@@ -20,6 +20,19 @@ TEST_PROMPT = "Reply with the single word: OK"
 
 
 # ─── cookie parsing ──────────────────────────────────────────────────────────
+
+# Gemini's XSRF token, embedded in the app HTML as "SNlM0e":"<value>".
+# Required for authenticated requests; anonymous ones do not need it.
+_XSRF_RE = re.compile(r'SNlM0e["\']?\s*[:=]\s*["\']([^"\']+)["\']')
+
+
+def extract_xsrf_token(text: str) -> str:
+    """Pull SNlM0e out of page source, a fetch snippet, or a bare token."""
+    if not text:
+        return ""
+    m = _XSRF_RE.search(text)
+    return m.group(1) if m else ""
+
 
 def parse_cookie_input(text: str) -> dict:
     """Extract the Gemini cookie string from arbitrary user paste.
@@ -33,6 +46,9 @@ def parse_cookie_input(text: str) -> dict:
     sapisid_hint = ""
     if not text:
         return {"cookie_str": "", "sapisid": "", "found": [], "missing": list(REQUIRED_COOKIES), "xsrf": ""}
+    # Keep the original: the cookie regex below may rewrite `text` when page
+    # source is pasted, which would otherwise hide the SNlM0e token.
+    raw = text
 
     if text.startswith("{"):
         try:
@@ -51,6 +67,10 @@ def parse_cookie_input(text: str) -> dict:
         if m:
             text = m.group(1).strip().strip('"').strip("'")
 
+    # Newlines are separators too: DevTools and browser exports wrap long
+    # cookie dumps across lines, and a stray \n makes the Cookie header invalid
+    # (urllib raises "Invalid header value" instead of sending the request).
+    text = re.sub(r"[\r\n]+", ";", text)
     pairs = {}
     for part in text.split(";"):
         if "=" in part:
@@ -62,10 +82,8 @@ def parse_cookie_input(text: str) -> dict:
     cookie_str = "; ".join(f"{k}={pairs[k]}" for k in pairs)
     sapisid = pairs.get("SAPISID") or sapisid_hint or None
 
-    # opportunistically pull an XSRF token (SNlM0e) if the page source is pasted
-    m = re.search(r'SNlM0e["\']?\s*[:=]\s*["\']([^"\']+)["\']', text)
-    if m:
-        xsrf = m.group(1)
+    # opportunistically pull an XSRF token if the page source was pasted
+    xsrf = extract_xsrf_token(raw) or extract_xsrf_token(text)
 
     return {"cookie_str": cookie_str, "sapisid": sapisid, "found": found, "missing": missing, "xsrf": xsrf}
 
@@ -78,6 +96,16 @@ def _mask_hint(cookie_str: str) -> str:
         if k in REQUIRED_COOKIES and v:
             hints.append(f"{k}={v[:4]}…{v[-4:]}" if len(v) > 8 else f"{k}={v[:2]}…")
     return "; ".join(hints)
+
+
+def _mask_token(value) -> str:
+    """Short masked preview of a token, so the console can show what it stored."""
+    v = str(value or "").strip()
+    if not v:
+        return ""
+    if len(v) <= 12:
+        return v[:4] + "…"
+    return f"{v[:6]}…{v[-4:]}"
 
 
 def _cookie_file_path() -> str:
@@ -113,9 +141,15 @@ def handle_api(handler, method: str, path: str) -> bool:
         ("POST", "/api/cookie/validate"): _api_cookie_validate,
         ("POST", "/api/cookie"): _api_cookie_save,
         ("POST", "/api/test"): _api_test,
+        ("GET", "/api/accounts"): _api_accounts_list,
+        ("POST", "/api/accounts"): _api_accounts_save,
+        ("POST", "/api/accounts/activate"): _api_accounts_activate,
     }
     if method == "DELETE" and path == "/api/cookie":
         _api_cookie_clear(handler)
+        return True
+    if method == "DELETE" and path == "/api/accounts":
+        _api_accounts_delete(handler)
         return True
     if method == "DELETE" and path == "/api/logs":
         _api_logs_clear(handler)
@@ -177,8 +211,23 @@ def _api_config(handler):
         else:
             handler.send_json({"error": "api_keys must be a list"}, 400)
             return
+    if "xsrf_token" in req:
+        raw = req["xsrf_token"]
+        if raw in (None, ""):
+            CONFIG["xsrf_token"] = None
+        else:
+            s = str(raw).strip()
+            # A bare token is short; anything long or containing the key is
+            # page source, so pull the token out of it.
+            if len(s) > 200 or "SNlM0e" in s:
+                tok = extract_xsrf_token(s)
+                if not tok:
+                    handler.send_json({"error": "未能从粘贴内容中识别 SNlM0e，请确认粘贴的是 gemini.google.com 的网页源代码（Ctrl+U 全选复制）"}, 400)
+                    return
+                s = tok
+            CONFIG["xsrf_token"] = s or None
     for f in _CONFIG_FIELDS:
-        if f in req:
+        if f in req and f != "xsrf_token":
             val = req[f]
             if f in ("auth_user", "xsrf_token", "proxy", "default_model", "gemini_bl"):
                 CONFIG[f] = str(val).strip() if val not in (None, "") else None
@@ -211,6 +260,9 @@ def _try_generate(cookie_str=None, sapisid=None, model="gemini-3.5-flash"):
                         cookie_str=cookie_str, sapisid=sapisid)
     except urllib.error.HTTPError as e:
         code = e.code
+        if code == 400 and cookie_str:
+            return False, ("Gemini 返回 400：该账号的 cookie 可能被拒绝（失效/导出不完整/触发风控）。"
+                           "请重新导出 cookie，或补一个 xsrf_token（SNlM0e）"), ""
         if code in (400, 401, 403):
             return False, f"Gemini 拒绝了请求 (HTTP {code})，cookie 可能已过期或缺少权限", ""
         return False, f"Gemini 上游返回 HTTP {code}", ""
@@ -260,7 +312,20 @@ def _api_cookie_save(handler):
     req = _read_json_body(handler)
     parsed = parse_cookie_input(str(req.get("cookie", "")))
     if not parsed["cookie_str"]:
-        handler.send_json({"error": "没有解析到任何 cookie"}, 400)
+        # Page source carries SNlM0e but no cookie header: still allow
+        # refreshing just the XSRF token, otherwise there is no way to fix a
+        # "configured cookie + missing xsrf" 400 without re-pasting cookies.
+        if parsed["xsrf"]:
+            CONFIG["xsrf_token"] = parsed["xsrf"]
+            try:
+                save_config()
+            except RuntimeError:
+                pass
+            handler.send_json({"ok": True, "saved": None, "cookie_saved": False,
+                               "found": [], "hint": "", "xsrf": parsed["xsrf"],
+                               "xsrf_saved": True})
+            return
+        handler.send_json({"error": "没有解析到任何 cookie，也没找到 SNlM0e"}, 400)
         return
     if parsed["missing"]:
         handler.send_json({"error": "缺少关键 cookie：" + ", ".join(parsed["missing"]),
@@ -272,15 +337,25 @@ def _api_cookie_save(handler):
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(parsed["cookie_str"] + "\n")
+    # A cookie without SNlM0e makes Gemini reject every request with 400, so
+    # persist it right here instead of making the user save config separately.
+    xsrf_saved = False
+    need_save = False
+    if parsed["xsrf"]:
+        CONFIG["xsrf_token"] = parsed["xsrf"]
+        xsrf_saved = True
+        need_save = True
     if not CONFIG.get("cookie_file"):
         CONFIG["cookie_file"] = path
+        need_save = True
+    if need_save:
         try:
             save_config()
         except RuntimeError:
             pass
     handler.send_json({"ok": True, "saved": os.path.abspath(path),
                        "found": parsed["found"], "hint": _mask_hint(parsed["cookie_str"]),
-                       "xsrf": parsed["xsrf"]})
+                       "xsrf": parsed["xsrf"], "xsrf_saved": xsrf_saved})
 
 
 def _api_cookie_clear(handler):
@@ -291,6 +366,194 @@ def _api_cookie_clear(handler):
         os.remove(path)
         removed = True
     handler.send_json({"ok": True, "removed": removed, "anonymous": True})
+
+
+# ─── accounts (one Google account == one auth_user + cookie + xsrf) ──────────
+
+def _default_cookie_name(auth_user) -> str:
+    suffix = "default" if auth_user in (None, "") else str(auth_user)
+    return f"cookie_u{suffix}.txt"
+
+
+def _read_cookie_at(path) -> str:
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _api_accounts_list(handler):
+    accts = get_accounts()
+    active = CONFIG.get("active_account") or 0
+    out = []
+    for i, a in enumerate(accts):
+        cookie_str = _read_cookie_at(resolve_path(a.get("cookie_file")))
+        pairs = dict(p.split("=", 1) for p in cookie_str.split("; ") if "=" in p) if cookie_str else {}
+        found = [k for k in REQUIRED_COOKIES if pairs.get(k)]
+        out.append({
+            "idx": i,
+            "auth_user": a.get("auth_user"),
+            "label": a.get("label") or "",
+            "enabled": a.get("enabled", True),
+            "active": i == active,
+            "cookie_file": a.get("cookie_file"),
+            "cookie_configured": bool(cookie_str),
+            "found": found,
+            "missing": [k for k in REQUIRED_COOKIES if k not in found],
+            "hint": _mask_hint(cookie_str) if cookie_str else "",
+            "xsrf_set": bool(a.get("xsrf_token")),
+            "xsrf_hint": _mask_token(a.get("xsrf_token")),
+            # xsrf_token is optional; a malformed/invalid cookie is the usual
+            # cause of a 400, and failover handles it at request time.
+            "ready": bool(cookie_str) and not [k for k in REQUIRED_COOKIES if k not in found],
+        })
+    handler.send_json({"accounts": out, "active_account": active if accts else None,
+                       "anonymous": not accts})
+
+
+def _api_accounts_save(handler):
+    """Create or update one account.
+
+    Parses the cookie and the xsrf_token independently: the paste may carry
+    either, or both (page source usually contains SNlM0e).
+    """
+    req = _read_json_body(handler) or {}
+    cookie_paste = str(req.get("cookie") or "")
+    parsed = parse_cookie_input(cookie_paste)
+
+    xsrf_in = str(req.get("xsrf") or "").strip()
+    if len(xsrf_in) > 200 or "SNlM0e" in xsrf_in:
+        xsrf_in = extract_xsrf_token(xsrf_in) or xsrf_in
+    xsrf = xsrf_in or parsed["xsrf"] or None
+
+    # Only overwrite a field when the caller actually sent it: the two parse
+    # buttons each submit just their own field, and an absent key must never
+    # wipe a value that is already stored on the account.
+    has_auth_user = "auth_user" in req
+    auth_user = None
+    if has_auth_user:
+        raw_user = req.get("auth_user")
+        if raw_user not in (None, ""):
+            # /u/N is Google's numeric account index; anything else produces a
+            # bogus URL and Gemini answers 404. Use "label" for human names.
+            try:
+                auth_user = int(str(raw_user).strip())
+            except (TypeError, ValueError):
+                handler.send_json({"error": "auth_user 必须是数字序号（0、1、2…，对应 Google 的 /u/N）；"
+                                           "想给账号起名字请填「备注名」"}, 400)
+                return
+
+    accts = get_accounts()
+    idx = req.get("idx")
+    if idx is None:
+        acct = {"auth_user": auth_user if has_auth_user else None, "label": "",
+                "cookie_file": None, "xsrf_token": None, "enabled": True}
+        accts.append(acct)
+        idx = len(accts) - 1
+    else:
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            handler.send_json({"error": "idx 必须是数字"}, 400)
+            return
+        if not (0 <= idx < len(accts)):
+            handler.send_json({"error": f"账号不存在：{idx}"}, 400)
+            return
+        acct = accts[idx]
+        if has_auth_user:
+            acct["auth_user"] = auth_user
+    if "label" in req:
+        acct["label"] = str(req.get("label") or "").strip()
+    if "enabled" in req:
+        acct["enabled"] = bool(req.get("enabled"))
+    if xsrf:
+        acct["xsrf_token"] = xsrf
+
+    cookie_saved = False
+    if parsed["cookie_str"]:
+        if parsed["missing"]:
+            handler.send_json({"error": "缺少关键 cookie：" + ", ".join(parsed["missing"]),
+                               "missing": parsed["missing"]}, 400)
+            return
+        eff_user = auth_user if auth_user is not None else acct.get("auth_user")
+        path = (resolve_path(acct.get("cookie_file"))
+                or resolve_path(_default_cookie_name(eff_user)))
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(parsed["cookie_str"] + "\n")
+        acct["cookie_file"] = path
+        cookie_saved = True
+    elif cookie_paste.strip() and not parsed["xsrf"]:
+        handler.send_json({"error": "没有解析到任何 cookie，也没找到 SNlM0e"}, 400)
+        return
+
+    CONFIG["accounts"] = accts
+    try:
+        save_config()
+    except RuntimeError as e:
+        handler.send_json({"error": str(e)}, 400)
+        return
+    handler.send_json({"ok": True, "idx": idx, "cookie_saved": cookie_saved,
+                       "xsrf_saved": bool(xsrf)})
+
+
+def _api_accounts_activate(handler):
+    req = _read_json_body(handler) or {}
+    accts = get_accounts()
+    try:
+        idx = int(req.get("idx"))
+    except (TypeError, ValueError):
+        handler.send_json({"error": "idx 必须是数字"}, 400)
+        return
+    if not (0 <= idx < len(accts)):
+        handler.send_json({"error": f"账号不存在：{idx}"}, 400)
+        return
+    CONFIG["active_account"] = idx
+    try:
+        save_config()
+    except RuntimeError as e:
+        handler.send_json({"error": str(e)}, 400)
+        return
+    handler.send_json({"ok": True, "active_account": idx})
+
+
+def _api_accounts_delete(handler):
+    req = _read_json_body(handler) or {}
+    accts = get_accounts()
+    try:
+        idx = int(req.get("idx"))
+    except (TypeError, ValueError):
+        handler.send_json({"error": "idx 必须是数字"}, 400)
+        return
+    if not (0 <= idx < len(accts)):
+        handler.send_json({"error": f"账号不存在：{idx}"}, 400)
+        return
+    acct = accts.pop(idx)
+    removed_file = False
+    if req.get("remove_file"):
+        path = resolve_path(acct.get("cookie_file"))
+        if path and os.path.exists(path):
+            os.remove(path)
+            removed_file = True
+    active = CONFIG.get("active_account") or 0
+    if not accts:
+        CONFIG["active_account"] = 0
+    elif idx == active:
+        CONFIG["active_account"] = 0
+    elif idx < active:
+        CONFIG["active_account"] = active - 1
+    try:
+        save_config()
+    except RuntimeError as e:
+        handler.send_json({"error": str(e)}, 400)
+        return
+    handler.send_json({"ok": True, "removed": True, "removed_file": removed_file,
+                       "active_account": CONFIG["active_account"]})
 
 
 def _api_test(handler):
@@ -305,7 +568,11 @@ def _api_test(handler):
             return
         text = generate("用一句话介绍你自己", mode_id, think_mode, extra_fields=extra)
     except urllib.error.HTTPError as e:
-        handler.send_json({"ok": False, "detail": f"上游 HTTP {e.code}", "latency_ms": int((time.time()-t0)*1000)}, 200)
+        detail = f"上游 HTTP {e.code}"
+        if e.code == 400 and cookie_str:
+            detail = ("上游 HTTP 400：该账号的 cookie 可能被拒绝（失效/导出不完整/触发风控）。"
+                      "请重新导出 cookie，或补一个 xsrf_token（SNlM0e）")
+        handler.send_json({"ok": False, "detail": detail, "latency_ms": int((time.time()-t0)*1000)}, 200)
         return
     except Exception as e:
         handler.send_json({"ok": False, "detail": f"{type(e).__name__}: {e}", "latency_ms": int((time.time()-t0)*1000)}, 200)
@@ -408,7 +675,27 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .link-btn:hover { text-decoration: underline; }
   .card.collapsed { padding: 16px 20px; }
   .card.collapsed #ck-body { display: none; }
+  .acct-row { border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+  .acct-row.open { border-color: #94a3b8; overflow: visible; }
+  .acct-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+               padding: 10px 12px; background: #f8fafc; }
+  .acct-head b { font-size: 13px; }
+  .acct-actions { margin-left: auto; display: flex; gap: 10px; }
+  .acct-body { padding: 12px; border-top: 1px solid #e2e8f0; }
+  .acct-body label { margin-top: 8px; }
+  .link-btn.danger { color: #dc2626; }
+  .empty { color: #94a3b8; font-size: 12px; padding: 8px 0; }
   .card.collapsed .hint { margin-bottom: 0; }
+  .tip { display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px;
+         border-radius:50%; background:#e2e8f0; color:#64748b; font-size:11px; font-weight:600;
+         cursor:help; margin-left:6px; vertical-align:middle; position:relative; user-select:none; }
+  .tip:hover { background:#cbd5e1; color:#0f172a; }
+  .tip:hover::after { content: attr(data-tip); position:absolute; left:0; top:21px; width:260px;
+         max-width:260px; background:#0f172a; color:#f8fafc; border-radius:8px; padding:9px 11px;
+         font-size:12px; font-weight:400; line-height:1.55; text-align:left; z-index:99;
+         box-shadow:0 4px 14px rgba(15,23,42,.22); }
+  .kv { font-size:12px; color:#64748b; margin:4px 0 0; word-break:break-all; }
+  .kv b { color:#0f172a; font-weight:500; }
 </style>
 </head>
 <body>
@@ -426,40 +713,31 @@ PAGE_HTML = r"""<!DOCTYPE html>
   <div class="zone-title">① 连接与账号 <span class="zone-sub">决定“能否连上 Gemini、以什么身份访问”</span></div>
 
   <section class="card">
-    <h2>🔑 Cookie（账号凭据）
-      <span id="ck-badge" class="badge b-gray">未配置</span>
-      <button class="link-btn" id="btn-ck-toggle" hidden>展开</button>
+    <h2>👥 账号（多用户）
+      <span id="acct-badge" class="badge b-gray">未配置</span>
+      <span class="tip" data-tip="一个 Google 账号 = 一个 auth_user(/u/N) + 一个 cookie + 一个 xsrf_token，三者配对使用。请求被拒(400/401/403/429)时自动切换到下一个启用账号。一个账号都不配 = 匿名模式，Flash 系列照常可用。">?</span>
     </h2>
-    <p class="hint">作用：解锁 <b>gemini-3.1-pro</b> 真实路由。不配置 = 匿名模式，Flash 系列照常可用。仅影响模型路由，不影响其它配置。</p>
-    <div id="ck-body">
-      <textarea id="ck-input" placeholder="粘贴 cookie 内容，例如：&#10;SID=xxx; HSID=xxx; SSID=xxx; APISID=xxx; SAPISID=xxx; __Secure-1PSID=xxx"></textarea>
-      <p class="hint">支持整段粘贴：Cookie 请求头、document.cookie、DevTools「Copy as fetch」代码，会自动提取 6 个关键字段。</p>
-      <div class="actions">
-        <button class="btn btn-ghost" id="btn-parse">解析并验证</button>
-        <button class="btn btn-primary" id="btn-save-ck" disabled>保存 Cookie</button>
-        <button class="btn btn-danger" id="btn-clear-ck">清除（回匿名模式）</button>
-        <button class="btn btn-ghost" onclick="window.open('https://gemini.google.com','_blank')">打开 Gemini 登录页 ↗</button>
-      </div>
-      <div class="result" id="ck-result"></div>
-      <div class="row">
-        <div><label>auth_user（多账号时的 /u/N 序号，可空）</label><input type="text" id="cf-auth-user"></div>
-        <div><label>xsrf_token（可选，SNlM0e 值）</label><input type="text" id="cf-xsrf"></div>
-      </div>
-      <details>
-        <summary>如何获取 Cookie？</summary>
-        <ol>
-          <li>点击上方按钮打开 <b>gemini.google.com</b> 并登录（Pro 路由需 Gemini Advanced 付费账号）。</li>
-          <li>按 <code>F12</code> 打开开发者工具 → <code>Application</code>(应用) → 左侧 <code>Cookies</code> → <code>https://gemini.google.com</code>。</li>
-          <li>找到 <code>SID</code>，双击值列全选复制；回到本页粘贴即可。</li>
-          <li>若登录态请求返回 400/xsrf 错误，把网页<b>源代码</b>（Ctrl+U 全选复制）粘贴进来，会自动提取 <code>SNlM0e</code>。</li>
-        </ol>
-      </details>
+    <div id="acct-list"><div class="empty">（加载中…）</div></div>
+    <div class="actions">
+      <button class="btn btn-primary" id="btn-acct-add">+ 新增账号</button>
+      <button class="btn btn-ghost" onclick="window.open('https://gemini.google.com','_blank')">打开 Gemini 登录页 ↗</button>
     </div>
+    <div class="result" id="acct-result"></div>
+    <details>
+      <summary>如何获取 cookie 和 xsrf_token？</summary>
+      <ol>
+        <li>打开 <b>gemini.google.com</b> 并登录（Pro 路由需 Gemini Advanced 付费账号）。多账号时看地址栏的 <code>/u/0</code>、<code>/u/1</code> 确定序号。</li>
+        <li><b>cookie</b>：<code>F12</code> → <code>Application</code>(应用) → <code>Cookies</code> → <code>https://gemini.google.com</code>，复制整串粘贴即可（也支持请求头、Copy as fetch）。</li>
+        <li><b>xsrf_token</b>（可选）：在页面按 <code>Ctrl+U</code> 看源代码，<b>整页复制粘进下面的 xsrf 框</b>，会自动提取 <code>SNlM0e</code>。多数情况下留空即可；若请求被拒（400）再补它。</li>
+        <li>两者可以分开填、分开保存，也可以一次把整页源码粘进任一框。</li>
+      </ol>
+    </details>
   </section>
 
   <section class="card">
-    <h2>🌐 网络与鉴权</h2>
-    <p class="hint">作用：代理决定“能否访问 gemini.google.com”（国内直连会超时）；API Key 决定“谁能调用本服务”。</p>
+    <h2>🌐 网络与鉴权
+      <span class="tip" data-tip="代理决定能否访问 gemini.google.com（国内直连会超时）；API Key 决定谁能调用本服务，留空则不校验。">?</span>
+    </h2>
     <label>代理（国内必配，如 http://127.0.0.1:7897）</label>
     <input type="text" id="cf-proxy" placeholder="留空则用系统环境变量">
     <label>API Keys（每行一个；留空则不校验密钥）</label>
@@ -469,8 +747,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   <div class="zone-title">② 模型与请求行为 <span class="zone-sub">决定“用哪个模型、失败后怎么重试”</span></div>
 
   <section class="card">
-    <h2>🤖 默认模型 <span class="badge b-blue" id="cf-model-cur">—</span></h2>
-    <p class="hint">这是<b>兜底模型</b>：客户端没传 model、或传了未知模型名（如 <code>gemini-9.9</code>）时，请求都会回退到它。客户端显式指定的模型优先级更高。</p>
+    <h2>🤖 默认模型 <span class="badge b-blue" id="cf-model-cur">—</span>
+      <span class="tip" data-tip="兜底模型：客户端没传 model、或传了未知模型名(如 gemini-9.9)时回退到它。客户端显式指定的模型优先级更高。">?</span>
+    </h2>
     <select id="cf-model"></select>
     <div class="row" style="margin-top:12px">
       <div><label>请求超时（秒）</label><input type="number" id="cf-timeout"></div>
@@ -492,8 +771,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   </section>
 
   <section class="card">
-    <h2>🧪 连通性测试 <span class="badge b-gray">一次性验证，不影响配置</span></h2>
-    <p class="hint">只验证“当前配置下能否正常出结果”，这里选的模型<b>不会被保存</b>。</p>
+    <h2>🧪 连通性测试 <span class="badge b-gray">一次性验证</span>
+      <span class="tip" data-tip="只验证当前配置能否正常出结果，这里选的模型不会被保存。">?</span>
+    </h2>
     <div class="row">
       <div><label>用这个模型测试</label><select id="ts-model"></select></div>
       <div style="display:flex;align-items:flex-end"><button class="btn btn-primary" id="btn-test" style="width:100%">发送测试请求</button></div>
@@ -504,8 +784,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   <div class="zone-title">③ 观测与接入 <span class="zone-sub">排障、以及把服务接到客户端</span></div>
 
   <section class="card">
-    <h2>📜 运行日志 <span class="badge b-gray" id="log-count">0 条</span></h2>
-    <p class="hint">服务端最近 500 条日志（请求、重试、BL 自动更新、错误），排障直接看这里。</p>
+    <h2>📜 运行日志 <span class="badge b-gray" id="log-count">0 条</span>
+      <span class="tip" data-tip="最近 500 条。每条请求打两行：→ 出发(账号、/u/N、model、prompt 长度、cookie 字段数、xsrf 有无)，← 回来(HTTP 码、耗时、响应长度)。账号切换、重试、BL 更新也会记。">?</span>
+    </h2>
     <div style="display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap">
       <label style="display:flex;align-items:center;gap:6px;margin:0">
         <input type="checkbox" id="log-auto" checked> 每 2 秒自动刷新
@@ -534,17 +815,26 @@ PAGE_HTML = r"""<!DOCTYPE html>
 const $ = id => document.getElementById(id);
 let S = null;                 // status snapshot
 let AUTH_KEY = localStorage.getItem('gw2a_key') || '';
-let pendingCookie = null;     // parsed cookie awaiting save
-let cookieManuallyExpanded = false;  // user opened the collapsed cookie card
 
 function toast(msg, ms=2600) {
   const t = $('toast'); t.textContent = msg; t.style.display = 'block';
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms);
 }
-async function api(path, opts={}) {
+async function api(path, opts={}, timeoutMs=0) {
   opts.headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
   if (AUTH_KEY) opts.headers['Authorization'] = 'Bearer ' + AUTH_KEY;
-  const r = await fetch(path, opts);
+  let timer = null;
+  if (timeoutMs > 0) {
+    const ctrl = new AbortController();
+    opts.signal = ctrl.signal;
+    timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  }
+  let r;
+  try {
+    r = await fetch(path, opts);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (r.status === 401) {
     const k = prompt('此服务已启用 API Key 鉴权，请输入密钥：');
     if (k) { AUTH_KEY = k; localStorage.setItem('gw2a_key', k); return api(path, opts); }
@@ -566,11 +856,10 @@ async function loadStatus() {
   $('st-badge').textContent = '运行中'; $('st-badge').className = 'badge b-green';
 
   const ck = S.cookie;
-  const badge = $('ck-badge');
+  const badge = $('acct-badge');
   if (!ck.configured) { badge.textContent = '未配置（匿名模式）'; badge.className = 'badge b-gray'; }
   else if (ck.missing.length) { badge.textContent = '已配置 · 缺少 ' + ck.missing.join(','); badge.className = 'badge b-yellow'; }
   else { badge.textContent = '已配置（6/6 完整）'; badge.className = 'badge b-green'; }
-  applyCookieCollapse(ck.configured);
 
   const g = (k, v) => `<div class="item"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   $('status-grid').innerHTML =
@@ -588,9 +877,6 @@ async function loadStatus() {
   $('cf-bl').value = S.gemini_bl || '';
   $('cf-timeout').value = 180; $('cf-retry').value = 3; $('cf-retry-delay').value = 2;
   $('cf-log').checked = !!S.log_requests;
-  $('cf-auth-user').value = S.auth_user || '';
-  $('cf-xsrf').value = '';
-  $('cf-xsrf').placeholder = S.xsrf_token ? '当前：' + S.xsrf_token : '未设置';
   const modelSel = $('cf-model'), tsSel = $('ts-model');
   modelSel.innerHTML = ''; tsSel.innerHTML = '';
   Object.keys(S.models).forEach(m => {
@@ -601,60 +887,156 @@ async function loadStatus() {
   renderClient();
 }
 
-// Cookie card collapses to one line once credentials are saved.
-function applyCookieCollapse(configured) {
-  const card = $('ck-body').closest('.card');
-  const btn = $('btn-ck-toggle');
-  const collapsed = configured && !cookieManuallyExpanded;
-  card.classList.toggle('collapsed', collapsed);
-  btn.hidden = !configured;
-  btn.textContent = collapsed ? '展开' : '收起';
+// ── accounts ──
+// One row per Google account. Each owns an auth_user, a cookie and an
+// xsrf_token; all three are edited independently inside the row.
+let ACCTS = [];
+let openRow = null;          // idx of the row whose editor is expanded
+
+function acctName(a) {
+  return a.auth_user === null || a.auth_user === '' ? '默认账号' : `/u/${a.auth_user}`;
 }
 
-// ── cookie ──
-$('btn-ck-toggle').onclick = () => {
-  cookieManuallyExpanded = !$('ck-body').closest('.card').classList.contains('collapsed');
-  applyCookieCollapse(!!(S && S.cookie.configured));
-};
-$('btn-parse').onclick = async () => {
-  const v = $('ck-input').value;
-  if (!v.trim()) { toast('请先粘贴 cookie 内容'); return; }
-  $('btn-parse').disabled = true;
-  try {
-    const r = await api('/api/cookie/validate', {method: 'POST', body: JSON.stringify({cookie: v})});
-    pendingCookie = r.valid ? v : null;
-    $('btn-save-ck').disabled = !r.valid;
-    let html = `<b>${esc(r.detail)}</b>`;
-    if (r.found && r.found.length) html += `<br>已识别（${r.found.length}/6）：${esc(r.found.join(', '))}`;
-    if (r.missing && r.missing.length) html += `<br>缺失：${esc(r.missing.join(', '))}`;
-    if (r.xsrf) html += `<br>检测到 xsrf_token，保存后可自动填入`;
-    showResult($('ck-result'), r.valid, html);
-  } catch (e) { showResult($('ck-result'), false, esc(e.message)); }
-  $('btn-parse').disabled = false;
-};
-$('btn-save-ck').onclick = async () => {
-  if (!pendingCookie) return;
-  $('btn-save-ck').disabled = true;
-  try {
-    const r = await api('/api/cookie', {method: 'POST', body: JSON.stringify({cookie: pendingCookie})});
-    if (r.xsrf && !$('cf-xsrf').value) { $('cf-xsrf').value = r.xsrf; }
-    toast('Cookie 已保存并立即生效');
-    pendingCookie = null; $('ck-input').value = '';
-    cookieManuallyExpanded = false;   // re-collapse after a successful save
-    loadStatus();
-  } catch (e) { toast('保存失败：' + e.message); }
-  $('btn-save-ck').disabled = true;
-};
-$('btn-clear-ck').onclick = async () => {
-  if (!confirm('确定清除 Cookie 并回到匿名模式吗？\n（cookie.txt 会被删除，其它配置不受影响）')) return;
-  try {
-    await api('/api/cookie', {method: 'DELETE'});
-    toast('已清除，当前匿名模式');
-    cookieManuallyExpanded = false;
-    loadStatus();
+function acctState(a) {
+  // xsrf_token is optional: requests succeed without it unless Google
+  // specifically challenges the session (then it answers 400 and we failover).
+  if (!a.cookie_configured) return ['未配置 cookie（匿名）', 'b-gray'];
+  if (a.missing && a.missing.length) return ['cookie 缺 ' + a.missing.join(','), 'b-yellow'];
+  return [a.xsrf_set ? '就绪' : '就绪（未设 xsrf）', 'b-green'];
+}
+
+function renderAccounts() {
+  const box = $('acct-list');
+  if (!ACCTS.length) {
+    box.innerHTML = '<div class="empty">（尚未配置任何账号，当前为匿名模式，Flash 系列可直接使用）</div>';
+    return;
   }
-  catch (e) { toast('操作失败：' + e.message); }
+  box.innerHTML = ACCTS.map(a => {
+    const [txt, cls] = acctState(a);
+    const open = openRow === a.idx;
+    return `<div class="acct-row${open ? ' open' : ''}">
+      <div class="acct-head">
+        <b>${esc(a.label || acctName(a))}</b>
+        ${a.active ? '<span class="badge b-green">当前</span>' : ''}
+        <span class="badge ${cls}">${esc(txt)}</span>
+        <span class="acct-actions">
+          ${a.active ? '' : `<button class="link-btn" data-act="activate" data-i="${a.idx}">设为当前</button>`}
+          <button class="link-btn" data-act="toggle" data-i="${a.idx}">${open ? '收起' : '编辑'}</button>
+          <button class="link-btn danger" data-act="del" data-i="${a.idx}">删除</button>
+        </span>
+      </div>
+      ${open ? `<div class="acct-body">
+        <div class="row">
+          <div><label>auth_user
+            <span class="tip" data-tip="Google 账号序号，只能填数字。从浏览器地址栏看：gemini.google.com/u/1/... 里的 1 就是。无法从 cookie 反推，但单账号不用填——留空时请求不带 /u/N，实测可用。只在多账号时才需要逐个填。">?</span></label>
+            <input type="text" data-f="auth_user" data-i="${a.idx}" value="${esc(a.auth_user ?? '')}" placeholder="留空 = 单账号"></div>
+          <div><label>备注名</label>
+            <input type="text" data-f="label" data-i="${a.idx}" value="${esc(a.label || '')}" placeholder="起个好认的名字"></div>
+        </div>
+        <label>cookie
+          <span class="tip" data-tip="粘贴整串即可，也认请求头、Copy as fetch。自动提取 6 个关键字段：SID / HSID / SSID / APISID / SAPISID / __Secure-1PSID。直接粘整页源码也行，能同时把 xsrf 提出来。">?</span></label>
+        <textarea data-f="cookie" data-i="${a.idx}" placeholder="SID=xxx; HSID=xxx; SSID=xxx; APISID=xxx; SAPISID=xxx; __Secure-1PSID=xxx"></textarea>
+        <p class="kv">${a.hint ? `已存：<b>${esc(a.hint)}</b>` : '未配置（匿名模式）'}</p>
+        <div class="actions">
+          <button class="btn btn-ghost" data-act="parse-cookie" data-i="${a.idx}">解析并保存 Cookie</button>
+        </div>
+        <label>xsrf_token
+          <span class="tip" data-tip="页面里的 SNlM0e，可选。按 Ctrl+U 打开源码整页粘进来，自动提取。实测不带它请求也能成功，所以只在报 400 时才需要补。">?</span></label>
+        <textarea data-f="xsrf" data-i="${a.idx}" style="min-height:50px" placeholder="粘贴 gemini.google.com 整页源码（Ctrl+U）即可"></textarea>
+        <p class="kv">${a.xsrf_hint ? `已存：<b>${esc(a.xsrf_hint)}</b>` : '未设置（可选，多数情况不需要）'}</p>
+        <div class="actions">
+          <button class="btn btn-ghost" data-act="parse-xsrf" data-i="${a.idx}">解析并保存 xsrf</button>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary" data-act="save" data-i="${a.idx}">保存该账号</button>
+          <label style="display:flex;align-items:center;gap:6px;margin:0">
+            <input type="checkbox" data-f="enabled" data-i="${a.idx}" ${a.enabled ? 'checked' : ''}> 启用（参与故障转移）
+          </label>
+        </div>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+$('acct-list').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-act]');
+  if (!btn) return;
+  const i = +btn.dataset.i, act = btn.dataset.act;
+  if (act === 'toggle') { openRow = openRow === i ? null : i; renderAccounts(); return; }
+  if (act === 'activate') {
+    try { await api('/api/accounts/activate', {method: 'POST', body: JSON.stringify({idx: i})}); toast('已设为当前账号'); await loadAccounts(); loadStatus(); }
+    catch (e) { toast('操作失败：' + e.message); }
+    return;
+  }
+  if (act === 'del') {
+    const a = ACCTS.find(x => x.idx === i) || {};
+    if (!confirm(`确定删除账号 ${a.label || acctName(a)} 吗？\n（cookie 文件会一并删除，其它账号不受影响）`)) return;
+    try { await api('/api/accounts', {method: 'DELETE', body: JSON.stringify({idx: i, remove_file: true})}); toast('已删除'); openRow = null; await loadAccounts(); loadStatus(); }
+    catch (e) { toast('删除失败：' + e.message); }
+    return;
+  }
+  if (act === 'parse-cookie' || act === 'parse-xsrf') {
+    // Each field parses and persists on its own: pasting cookies must not
+    // clear the xsrf token, and vice versa.
+    const field = act === 'parse-cookie' ? 'cookie' : 'xsrf';
+    const pick = f => { const el = document.querySelector(`[data-f="${f}"][data-i="${i}"]`); return el ? el.value : ''; };
+    const raw = pick(field);
+    if (!raw.trim()) { toast(`请先粘贴${field === 'cookie' ? ' cookie' : ' xsrf'}内容`); return; }
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '解析中…';
+    try {
+      const body = {idx: i, auth_user: pick('auth_user'), label: pick('label')};
+      body[field] = raw;
+      const en = document.querySelector(`[data-f="enabled"][data-i="${i}"]`);
+      body.enabled = en ? en.checked : true;
+      const r = await api('/api/accounts', {method: 'POST', body: JSON.stringify(body)});
+      let html = '<b>解析完成</b>';
+      if (r.cookie_saved) html += '<br>✓ cookie 已写入文件';
+      if (r.xsrf_saved) html += '<br>✓ xsrf_token 已写入';
+      if (!r.cookie_saved && !r.xsrf_saved) html += '<br>⚠ 没有解析出有效内容，请检查粘贴的内容';
+      showResult($('acct-result'), true, html);
+      await loadAccounts(); loadStatus();
+    } catch (e) { showResult($('acct-result'), false, esc(e.message)); }
+    btn.disabled = false;
+    btn.textContent = label;
+    return;
+  }
+  if (act === 'save') {
+    const val = f => { const el = document.querySelector(`[data-f="${f}"][data-i="${i}"]`); return el ? el.value : ''; };
+    const checked = f => { const el = document.querySelector(`[data-f="${f}"][data-i="${i}"]`); return el ? el.checked : true; };
+    btn.disabled = true;
+    try {
+      const r = await api('/api/accounts', {method: 'POST', body: JSON.stringify({
+        idx: i, auth_user: val('auth_user'), label: val('label'),
+        cookie: val('cookie'), xsrf: val('xsrf'), enabled: checked('enabled'),
+      })});
+      let html = '<b>已保存</b>';
+      if (r.cookie_saved) html += '<br>✓ cookie 已写入文件';
+      if (r.xsrf_saved) html += '<br>✓ xsrf_token 已写入';
+      if (!r.cookie_saved && !r.xsrf_saved) html += '<br>（没有粘贴新内容，仅更新了账号信息）';
+      showResult($('acct-result'), true, html);
+      await loadAccounts(); loadStatus();
+    } catch (e) { showResult($('acct-result'), false, esc(e.message)); }
+    btn.disabled = false;
+  }
+});
+
+$('btn-acct-add').onclick = () => {
+  const next = ACCTS.length ? Math.max(...ACCTS.map(a => (typeof a.auth_user === 'number' ? a.auth_user : -1))) + 1 : 0;
+  api('/api/accounts', {method: 'POST', body: JSON.stringify({auth_user: next, label: '', cookie: '', xsrf: '', enabled: true})})
+    .then(() => loadAccounts())
+    .then(() => { openRow = ACCTS.length - 1; renderAccounts(); toast('已新增账号，请粘贴 cookie 与 xsrf_token'); })
+    .catch(e => toast('新增失败：' + e.message));
 };
+
+async function loadAccounts() {
+  try {
+    const r = await api('/api/accounts');
+    ACCTS = r.accounts || [];
+    renderAccounts();
+  } catch (e) { $('acct-list').innerHTML = '<div class="empty">（读取账号失败：' + esc(e.message) + '）</div>'; }
+}
 
 // ── config ──
 $('btn-save-cfg').onclick = async () => {
@@ -668,8 +1050,7 @@ $('btn-save-cfg').onclick = async () => {
     retry_attempts: +$('cf-retry').value || 3,
     retry_delay_sec: +$('cf-retry-delay').value || 2,
     log_requests: $('cf-log').checked,
-    auth_user: $('cf-auth-user').value.trim() || null,
-    xsrf_token: $('cf-xsrf').value.trim() || null,
+    // auth_user / xsrf_token now belong to an account, not to global config.
   };
   try {
     const r = await api('/api/config', {method: 'POST', body: JSON.stringify(body)});
@@ -763,7 +1144,7 @@ $('btn-log-clear').onclick = async () => {
 };
 setInterval(() => { if ($('log-auto').checked) pollLogs(); }, 2000);
 
-loadStatus().then(pollLogs);
+loadStatus().then(loadAccounts).then(pollLogs);
 </script>
 </body>
 </html>

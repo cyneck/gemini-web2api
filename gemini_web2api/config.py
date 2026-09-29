@@ -18,9 +18,17 @@ DEFAULT_CONFIG = {
     "proxy": None,
     "api_keys": [],
     "temporary_chats": False,
+    # Multi-account: one Google account == one auth_user + one cookie + one
+    # xsrf_token. The legacy single-value fields above are kept for
+    # compatibility and folded into accounts[0] by migrate_legacy_account().
+    "accounts": [],
+    "active_account": 0,
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
+
+# Per-account fields stored in CONFIG["accounts"][i].
+ACCOUNT_FIELDS = ("auth_user", "label", "cookie_file", "xsrf_token", "enabled")
 
 _CONFIG_PATH = None
 _CONFIG_DIR = None
@@ -34,7 +42,77 @@ def load_config(path: str = None):
         _CONFIG_DIR = os.path.dirname(os.path.abspath(path))
         with open(path) as f:
             CONFIG.update(json.load(f))
+    migrate_legacy_account()
     return CONFIG
+
+
+# ─── accounts ────────────────────────────────────────────────────────────────
+
+def migrate_legacy_account() -> bool:
+    """Fold the legacy single-account fields into accounts[0].
+
+    Idempotent: once "accounts" is non-empty this does nothing. The legacy
+    fields are left in place so older tooling keeps working.
+    """
+    if CONFIG.get("accounts"):
+        return False
+    cookie_file = CONFIG.get("cookie_file")
+    xsrf = CONFIG.get("xsrf_token")
+    auth_user = CONFIG.get("auth_user")
+    if not cookie_file and not xsrf and auth_user is None:
+        return False
+    CONFIG["accounts"] = [{
+        "auth_user": auth_user,
+        "label": "",
+        "cookie_file": cookie_file,
+        "xsrf_token": xsrf,
+        "enabled": True,
+    }]
+    CONFIG["active_account"] = 0
+    return True
+
+
+def get_accounts() -> list:
+    """Return the configured account list (never None)."""
+    return CONFIG.get("accounts") or []
+
+
+def get_account(auth_user=None) -> dict:
+    """Return one account dict.
+
+    auth_user=None means "the active account". Falls back to {} when no
+    accounts are configured, in which case callers use the legacy fields.
+    """
+    accts = get_accounts()
+    if not accts:
+        return {}
+    if auth_user is None:
+        i = CONFIG.get("active_account") or 0
+        return accts[i] if 0 <= i < len(accts) else {}
+    for a in accts:
+        if str(a.get("auth_user")) == str(auth_user):
+            return a
+    return {}
+
+
+def account_index(auth_user=None) -> int:
+    """Index of the active account, or None when none are configured."""
+    accts = get_accounts()
+    if not accts:
+        return None
+    if auth_user is None:
+        i = CONFIG.get("active_account") or 0
+        return i if 0 <= i < len(accts) else 0
+    for i, a in enumerate(accts):
+        if str(a.get("auth_user")) == str(auth_user):
+            return i
+    return None
+
+
+def account_cookie_path(auth_user=None) -> str:
+    """Cookie file for one account; falls back to the legacy cookie_file."""
+    acct = get_account(auth_user)
+    return acct.get("cookie_file") or CONFIG.get("cookie_file")
 
 
 def config_path() -> str:

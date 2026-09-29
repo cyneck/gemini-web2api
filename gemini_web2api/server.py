@@ -239,6 +239,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         stream = req.get("stream", False)
+        log(f"chat 请求 model={model_name} stream={bool(stream)} "
+            f"messages={len(req.get('messages', []))} prompt={len(prompt)}字")
         cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         try:
             file_refs = _upload_images(images)
