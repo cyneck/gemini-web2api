@@ -15,8 +15,25 @@ from .models import MODELS, resolve_model
 from .gemini import generate, load_cookie, HAS_HTTPX
 from . import __version__
 
-REQUIRED_COOKIES = ["SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID"]
+# Every cookie found in the paste is forwarded, so these lists are only a
+# health check, never a filter. Keep them minimal: rejecting a paste that
+# would actually work is worse than accepting one that is thin.
+REQUIRED_COOKIES = ["SAPISID"]
+# Any one of these proves a signed-in session.
+SESSION_COOKIES = ["__Secure-1PSID", "__Secure-3PSID", "SID"]
+# Shown in the console as "what we recognised" — the classic six, for reference.
+DISPLAY_COOKIES = ["SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID"]
 TEST_PROMPT = "Reply with the single word: OK"
+
+
+def missing_credentials(pairs: dict) -> list:
+    """Credentials without which a request cannot possibly succeed."""
+    missing = []
+    if not pairs.get("SAPISID"):
+        missing.append("SAPISID")
+    if not any(pairs.get(k) for k in SESSION_COOKIES):
+        missing.append("任一会话 cookie（" + " / ".join(SESSION_COOKIES) + "）")
+    return missing
 
 
 # ─── cookie parsing ──────────────────────────────────────────────────────────
@@ -45,7 +62,8 @@ def parse_cookie_input(text: str) -> dict:
     xsrf = ""
     sapisid_hint = ""
     if not text:
-        return {"cookie_str": "", "sapisid": "", "found": [], "missing": list(REQUIRED_COOKIES), "xsrf": ""}
+        return {"cookie_str": "", "sapisid": "", "found": [],
+                "missing": missing_credentials({}), "xsrf": ""}
     # Keep the original: the cookie regex below may rewrite `text` when page
     # source is pasted, which would otherwise hide the SNlM0e token.
     raw = text
@@ -77,8 +95,8 @@ def parse_cookie_input(text: str) -> dict:
             k, v = part.split("=", 1)
             pairs[k.strip()] = v.strip()
 
-    found = [k for k in REQUIRED_COOKIES if k in pairs and pairs[k]]
-    missing = [k for k in REQUIRED_COOKIES if k not in found]
+    found = [k for k in DISPLAY_COOKIES if pairs.get(k)]
+    missing = missing_credentials(pairs)
     cookie_str = "; ".join(f"{k}={pairs[k]}" for k in pairs)
     sapisid = pairs.get("SAPISID") or sapisid_hint or None
 
@@ -93,7 +111,7 @@ def _mask_hint(cookie_str: str) -> str:
     hints = []
     for p in pairs:
         k, v = p.split("=", 1)
-        if k in REQUIRED_COOKIES and v:
+        if k in DISPLAY_COOKIES and v:
             hints.append(f"{k}={v[:4]}…{v[-4:]}" if len(v) > 8 else f"{k}={v[:2]}…")
     return "; ".join(hints)
 
@@ -119,12 +137,12 @@ def _cookie_state() -> dict:
         "sapisid": bool(sapisid),
         "path": os.path.abspath(_cookie_file_path()),
         "hint": _mask_hint(cookie_str) if cookie_str else "",
-        "found": [], "missing": list(REQUIRED_COOKIES),
+        "found": [], "missing": missing_credentials({}),
     }
     if cookie_str:
         pairs = dict(p.split("=", 1) for p in cookie_str.split("; ") if "=" in p)
-        state["found"] = [k for k in REQUIRED_COOKIES if pairs.get(k)]
-        state["missing"] = [k for k in REQUIRED_COOKIES if not pairs.get(k)]
+        state["found"] = [k for k in DISPLAY_COOKIES if pairs.get(k)]
+        state["missing"] = missing_credentials(pairs)
     return state
 
 
@@ -295,7 +313,7 @@ def _api_cookie_validate(handler):
     req = _read_json_body(handler)
     parsed = parse_cookie_input(str(req.get("cookie", "")))
     if not parsed["cookie_str"]:
-        handler.send_json({"valid": False, "found": [], "missing": REQUIRED_COOKIES,
+        handler.send_json({"valid": False, "found": [], "missing": missing_credentials({}),
                            "detail": "没有从输入中解析到任何 cookie"}, 200)
         return
     if parsed["missing"]:
@@ -392,7 +410,8 @@ def _api_accounts_list(handler):
     for i, a in enumerate(accts):
         cookie_str = _read_cookie_at(resolve_path(a.get("cookie_file")))
         pairs = dict(p.split("=", 1) for p in cookie_str.split("; ") if "=" in p) if cookie_str else {}
-        found = [k for k in REQUIRED_COOKIES if pairs.get(k)]
+        found = [k for k in DISPLAY_COOKIES if pairs.get(k)]
+        missing = missing_credentials(pairs)
         out.append({
             "idx": i,
             "auth_user": a.get("auth_user"),
@@ -402,13 +421,13 @@ def _api_accounts_list(handler):
             "cookie_file": a.get("cookie_file"),
             "cookie_configured": bool(cookie_str),
             "found": found,
-            "missing": [k for k in REQUIRED_COOKIES if k not in found],
+            "missing": missing,
             "hint": _mask_hint(cookie_str) if cookie_str else "",
             "xsrf_set": bool(a.get("xsrf_token")),
             "xsrf_hint": _mask_token(a.get("xsrf_token")),
             # xsrf_token is optional; a malformed/invalid cookie is the usual
             # cause of a 400, and failover handles it at request time.
-            "ready": bool(cookie_str) and not [k for k in REQUIRED_COOKIES if k not in found],
+            "ready": bool(cookie_str) and not missing,
         })
     handler.send_json({"accounts": out, "active_account": active if accts else None,
                        "anonymous": not accts})
