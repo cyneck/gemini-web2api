@@ -400,6 +400,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .log-line .t { color: #64748b; margin-right: 6px; }
   .log-line.lv-error { color: #fca5a5; }
   .log-box .empty { color: #64748b; }
+  .zone-title { font-size: 14px; font-weight: 700; color: #334155;
+                margin: 26px 0 0 4px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .zone-title .zone-sub { font-size: 12px; font-weight: 400; color: #94a3b8; }
+  .link-btn { margin-left: auto; background: none; border: none; color: #2563eb;
+              font-size: 13px; font-weight: 600; cursor: pointer; padding: 2px 6px; }
+  .link-btn:hover { text-decoration: underline; }
+  .card.collapsed { padding: 16px 20px; }
+  .card.collapsed #ck-body { display: none; }
+  .card.collapsed .hint { margin-bottom: 0; }
 </style>
 </head>
 <body>
@@ -414,42 +423,56 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <div class="grid" id="status-grid"></div>
   </section>
 
+  <div class="zone-title">① 连接与账号 <span class="zone-sub">决定“能否连上 Gemini、以什么身份访问”</span></div>
+
   <section class="card">
-    <h2>🔑 Cookie 配置 <span id="ck-badge" class="badge b-gray">未配置</span></h2>
-    <p class="hint">Cookie 用于解锁 <b>gemini-3.1-pro</b> 真实路由；不配置则以匿名模式使用 Flash 系列（零配置可用）。支持粘贴：Cookie 请求头、document.cookie、DevTools「Copy as fetch」整段代码。</p>
-    <textarea id="ck-input" placeholder="粘贴 cookie 内容，例如：&#10;SID=xxx; HSID=xxx; SSID=xxx; APISID=xxx; SAPISID=xxx; __Secure-1PSID=xxx"></textarea>
-    <div class="actions">
-      <button class="btn btn-ghost" id="btn-parse">解析并验证</button>
-      <button class="btn btn-primary" id="btn-save-ck" disabled>保存 Cookie</button>
-      <button class="btn btn-danger" id="btn-clear-ck">清除（回匿名模式）</button>
-      <button class="btn btn-ghost" onclick="window.open('https://gemini.google.com','_blank')">打开 Gemini 登录页 ↗</button>
-    </div>
-    <div class="result" id="ck-result"></div>
-    <details>
-      <summary>如何获取 Cookie？</summary>
-      <ol>
-        <li>点击上方按钮打开 <b>gemini.google.com</b> 并登录（Pro 路由需 Gemini Advanced 付费账号）。</li>
-        <li>按 <code>F12</code> 打开开发者工具 → <code>Application</code>(应用) → 左侧 <code>Cookies</code> → <code>https://gemini.google.com</code>。</li>
-        <li>找到 <code>SID</code>，双击值列全选复制；回到本页粘贴即可（智能解析会自动从整段文本中提取全部 6 个关键 cookie）。</li>
-        <li>如果登录态请求返回 400/xsrf 错误，把 Gemini 网页<b>源代码</b>（Ctrl+U 全选复制）粘贴进来，会自动提取 <code>SNlM0e</code> token。</li>
-      </ol>
-    </details>
-    <div class="row">
-      <div><label>auth_user（多账号时的 /u/N 序号，可空）</label><input type="text" id="cf-auth-user"></div>
-      <div><label>xsrf_token（可选，SNlM0e 值）</label><input type="text" id="cf-xsrf"></div>
+    <h2>🔑 Cookie（账号凭据）
+      <span id="ck-badge" class="badge b-gray">未配置</span>
+      <button class="link-btn" id="btn-ck-toggle" hidden>展开</button>
+    </h2>
+    <p class="hint">作用：解锁 <b>gemini-3.1-pro</b> 真实路由。不配置 = 匿名模式，Flash 系列照常可用。仅影响模型路由，不影响其它配置。</p>
+    <div id="ck-body">
+      <textarea id="ck-input" placeholder="粘贴 cookie 内容，例如：&#10;SID=xxx; HSID=xxx; SSID=xxx; APISID=xxx; SAPISID=xxx; __Secure-1PSID=xxx"></textarea>
+      <p class="hint">支持整段粘贴：Cookie 请求头、document.cookie、DevTools「Copy as fetch」代码，会自动提取 6 个关键字段。</p>
+      <div class="actions">
+        <button class="btn btn-ghost" id="btn-parse">解析并验证</button>
+        <button class="btn btn-primary" id="btn-save-ck" disabled>保存 Cookie</button>
+        <button class="btn btn-danger" id="btn-clear-ck">清除（回匿名模式）</button>
+        <button class="btn btn-ghost" onclick="window.open('https://gemini.google.com','_blank')">打开 Gemini 登录页 ↗</button>
+      </div>
+      <div class="result" id="ck-result"></div>
+      <div class="row">
+        <div><label>auth_user（多账号时的 /u/N 序号，可空）</label><input type="text" id="cf-auth-user"></div>
+        <div><label>xsrf_token（可选，SNlM0e 值）</label><input type="text" id="cf-xsrf"></div>
+      </div>
+      <details>
+        <summary>如何获取 Cookie？</summary>
+        <ol>
+          <li>点击上方按钮打开 <b>gemini.google.com</b> 并登录（Pro 路由需 Gemini Advanced 付费账号）。</li>
+          <li>按 <code>F12</code> 打开开发者工具 → <code>Application</code>(应用) → 左侧 <code>Cookies</code> → <code>https://gemini.google.com</code>。</li>
+          <li>找到 <code>SID</code>，双击值列全选复制；回到本页粘贴即可。</li>
+          <li>若登录态请求返回 400/xsrf 错误，把网页<b>源代码</b>（Ctrl+U 全选复制）粘贴进来，会自动提取 <code>SNlM0e</code>。</li>
+        </ol>
+      </details>
     </div>
   </section>
 
   <section class="card">
-    <h2>⚙️ 通用配置</h2>
+    <h2>🌐 网络与鉴权</h2>
+    <p class="hint">作用：代理决定“能否访问 gemini.google.com”（国内直连会超时）；API Key 决定“谁能调用本服务”。</p>
+    <label>代理（国内必配，如 http://127.0.0.1:7897）</label>
+    <input type="text" id="cf-proxy" placeholder="留空则用系统环境变量">
     <label>API Keys（每行一个；留空则不校验密钥）</label>
     <textarea id="cf-keys" style="min-height:60px" placeholder="sk-xxxxxxxx"></textarea>
-    <div class="row">
-      <div><label>代理（可空，如 http://127.0.0.1:7890）</label><input type="text" id="cf-proxy"></div>
-      <div><label>默认模型</label><select id="cf-model"></select></div>
-      <div><label>gemini_bl（前端版本号）</label><input type="text" id="cf-bl"></div>
-    </div>
-    <div class="row">
+  </section>
+
+  <div class="zone-title">② 模型与请求行为 <span class="zone-sub">决定“用哪个模型、失败后怎么重试”</span></div>
+
+  <section class="card">
+    <h2>🤖 默认模型 <span class="badge b-blue" id="cf-model-cur">—</span></h2>
+    <p class="hint">这是<b>兜底模型</b>：客户端没传 model、或传了未知模型名（如 <code>gemini-9.9</code>）时，请求都会回退到它。客户端显式指定的模型优先级更高。</p>
+    <select id="cf-model"></select>
+    <div class="row" style="margin-top:12px">
       <div><label>请求超时（秒）</label><input type="number" id="cf-timeout"></div>
       <div><label>重试次数</label><input type="number" id="cf-retry"></div>
       <div><label>重试间隔（秒）</label><input type="number" id="cf-retry-delay"></div>
@@ -457,6 +480,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
       <input type="checkbox" id="cf-log"> 记录请求日志
     </label>
+    <details>
+      <summary>进阶：gemini_bl（前端版本号）</summary>
+      <p class="hint">服务启动时会自动向 Google 抓取最新版本号；仅在自动更新失败时才需要手工填写。</p>
+      <input type="text" id="cf-bl">
+    </details>
     <div class="actions">
       <button class="btn btn-primary" id="btn-save-cfg">保存配置</button>
       <span class="hint" id="cfg-saved-hint"></span>
@@ -464,13 +492,16 @@ PAGE_HTML = r"""<!DOCTYPE html>
   </section>
 
   <section class="card">
-    <h2>🧪 连通性测试</h2>
+    <h2>🧪 连通性测试 <span class="badge b-gray">一次性验证，不影响配置</span></h2>
+    <p class="hint">只验证“当前配置下能否正常出结果”，这里选的模型<b>不会被保存</b>。</p>
     <div class="row">
-      <div><label>模型</label><select id="ts-model"></select></div>
+      <div><label>用这个模型测试</label><select id="ts-model"></select></div>
       <div style="display:flex;align-items:flex-end"><button class="btn btn-primary" id="btn-test" style="width:100%">发送测试请求</button></div>
     </div>
     <div class="result" id="ts-result"></div>
   </section>
+
+  <div class="zone-title">③ 观测与接入 <span class="zone-sub">排障、以及把服务接到客户端</span></div>
 
   <section class="card">
     <h2>📜 运行日志 <span class="badge b-gray" id="log-count">0 条</span></h2>
@@ -504,6 +535,7 @@ const $ = id => document.getElementById(id);
 let S = null;                 // status snapshot
 let AUTH_KEY = localStorage.getItem('gw2a_key') || '';
 let pendingCookie = null;     // parsed cookie awaiting save
+let cookieManuallyExpanded = false;  // user opened the collapsed cookie card
 
 function toast(msg, ms=2600) {
   const t = $('toast'); t.textContent = msg; t.style.display = 'block';
@@ -537,13 +569,14 @@ async function loadStatus() {
   const badge = $('ck-badge');
   if (!ck.configured) { badge.textContent = '未配置（匿名模式）'; badge.className = 'badge b-gray'; }
   else if (ck.missing.length) { badge.textContent = '已配置 · 缺少 ' + ck.missing.join(','); badge.className = 'badge b-yellow'; }
-  else { badge.textContent = '已配置'; badge.className = 'badge b-green'; }
+  else { badge.textContent = '已配置（6/6 完整）'; badge.className = 'badge b-green'; }
+  applyCookieCollapse(ck.configured);
 
   const g = (k, v) => `<div class="item"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   $('status-grid').innerHTML =
     g('监听地址', esc(S.host + ':' + S.port)) +
     g('代理', esc(S.proxy || '系统环境变量')) +
-    g('默认模型', esc(S.default_model)) +
+    g('默认模型', '<span id="st-model">' + esc(S.default_model) + '</span>') +
     g('API Key', S.auth_enabled ? `已启用（${S.api_keys_count} 个）` : '未启用（免密）') +
     g('流式输出', S.streaming ? 'httpx 真流式' : 'urllib 缓冲') +
     g('Cookie 状态', ck.configured ? esc(ck.hint || '已加载') : '匿名') +
@@ -564,10 +597,25 @@ async function loadStatus() {
     modelSel.add(new Option(m + ' — ' + S.models[m], m, false, m === S.default_model));
     tsSel.add(new Option(m, m, false, m === S.default_model));
   });
+  $('cf-model-cur').textContent = '当前 ' + S.default_model;
   renderClient();
 }
 
+// Cookie card collapses to one line once credentials are saved.
+function applyCookieCollapse(configured) {
+  const card = $('ck-body').closest('.card');
+  const btn = $('btn-ck-toggle');
+  const collapsed = configured && !cookieManuallyExpanded;
+  card.classList.toggle('collapsed', collapsed);
+  btn.hidden = !configured;
+  btn.textContent = collapsed ? '展开' : '收起';
+}
+
 // ── cookie ──
+$('btn-ck-toggle').onclick = () => {
+  cookieManuallyExpanded = !$('ck-body').closest('.card').classList.contains('collapsed');
+  applyCookieCollapse(!!(S && S.cookie.configured));
+};
 $('btn-parse').onclick = async () => {
   const v = $('ck-input').value;
   if (!v.trim()) { toast('请先粘贴 cookie 内容'); return; }
@@ -592,13 +640,19 @@ $('btn-save-ck').onclick = async () => {
     if (r.xsrf && !$('cf-xsrf').value) { $('cf-xsrf').value = r.xsrf; }
     toast('Cookie 已保存并立即生效');
     pendingCookie = null; $('ck-input').value = '';
+    cookieManuallyExpanded = false;   // re-collapse after a successful save
     loadStatus();
   } catch (e) { toast('保存失败：' + e.message); }
   $('btn-save-ck').disabled = true;
 };
 $('btn-clear-ck').onclick = async () => {
-  if (!confirm('确定清除 Cookie 并回到匿名模式吗？')) return;
-  try { await api('/api/cookie', {method: 'DELETE'}); toast('已清除，当前匿名模式'); loadStatus(); }
+  if (!confirm('确定清除 Cookie 并回到匿名模式吗？\n（cookie.txt 会被删除，其它配置不受影响）')) return;
+  try {
+    await api('/api/cookie', {method: 'DELETE'});
+    toast('已清除，当前匿名模式');
+    cookieManuallyExpanded = false;
+    loadStatus();
+  }
   catch (e) { toast('操作失败：' + e.message); }
 };
 
@@ -620,7 +674,10 @@ $('btn-save-cfg').onclick = async () => {
   try {
     const r = await api('/api/config', {method: 'POST', body: JSON.stringify(body)});
     $('cfg-saved-hint').textContent = '已写入 ' + r.saved;
+    $('cf-model-cur').textContent = '当前 ' + body.default_model;
     toast('配置已保存' + (r.auth_enabled ? '（API 鉴权已启用）' : '（免密）'));
+    // keep the connectivity test aligned with the newly saved default model
+    $('ts-model').value = body.default_model;
     loadStatus();
   } catch (e) { toast('保存失败：' + e.message); }
 };
