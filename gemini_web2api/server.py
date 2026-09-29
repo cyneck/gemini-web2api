@@ -11,7 +11,10 @@ from .models import MODELS, resolve_model
 from .gemini import generate, generate_stream, log
 from .tools import messages_to_prompt, parse_tool_calls, google_contents_to_prompt, parse_google_function_calls
 from .multimodal import upload_image, fetch_image_bytes
+from .webui import handle_api as webui_api, handle_ui as webui_page
 from . import __version__
+
+_BROWSER_UA = re.compile(r"Mozilla|Chrome|Safari|Edge|Firefox|Opera", re.IGNORECASE)
 
 
 def _usage(prompt: str, text: str) -> dict:
@@ -83,6 +86,24 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            path = self.path.split("?")[0]
+            if path == "/":
+                # Browsers land on the console; scripts keep the JSON status.
+                if _BROWSER_UA.search(self.headers.get("User-Agent", "")):
+                    self.send_response(302)
+                    self.send_header("Location", "/ui")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+            elif path == "/ui":
+                webui_page(self)
+                return
+            elif path.startswith("/api/"):
+                if not self._authorized():
+                    self.send_json({"error": {"message": "invalid api key"}}, 401)
+                    return
+                webui_api(self, "GET", path)
+                return
             if self.path.startswith("/v1/") and not self._authorized():
                 self.send_json({"error": {"message": "invalid api key"}}, 401)
                 return
@@ -107,6 +128,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            path = self.path.split("?")[0]
+            if path.startswith("/api/"):
+                if not self._authorized():
+                    self.send_json({"error": {"message": "invalid api key"}}, 401)
+                    return
+                webui_api(self, "POST", path)
+                return
             if self.path.startswith("/v1/") and not self._authorized():
                 self.send_json({"error": {"message": "invalid api key"}}, 401)
                 return
@@ -130,6 +158,21 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": {"message": str(e)}}, 500)
             except:
                 pass
+
+    def do_DELETE(self):
+        try:
+            path = self.path.split("?")[0]
+            if path.startswith("/api/"):
+                if not self._authorized():
+                    self.send_json({"error": {"message": "invalid api key"}}, 401)
+                    return
+                webui_api(self, "DELETE", path)
+                return
+            self.send_json({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            log(f"DELETE error: {e}")
 
     # ─── /v1/chat/completions ─────────────────────────────────────────────────
 

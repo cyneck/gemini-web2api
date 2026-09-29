@@ -189,11 +189,25 @@ def extract_response_text(raw: str) -> str:
     return clean_text(last_text)
 
 
-def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
-    """Non-streaming generation with retry."""
+def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None,
+             cookie_str: str = None, sapisid: str = None) -> str:
+    """Non-streaming generation with retry.
+
+    cookie_str/sapisid override the configured cookie for this call only
+    (used by the web UI to validate credentials before saving). Passing
+    cookie_str="" forces an anonymous request regardless of configuration.
+    """
     body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields).encode()
     url = _get_url()
     headers = _build_headers()
+    if cookie_str is not None:
+        if cookie_str:
+            headers["Cookie"] = cookie_str
+            if sapisid:
+                headers["Authorization"] = make_sapisidhash(sapisid)
+        else:
+            headers.pop("Cookie", None)
+            headers.pop("Authorization", None)
     ctx = _get_ssl_ctx()
     proxy = CONFIG.get("proxy")
 

@@ -4,9 +4,17 @@
 #   1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE
 
 MODELS = {
+    "gemini-3.8-flash": {
+        "mode": 1, "think": 4,
+        "desc": "Latest all-around model (Gemini 3.8 Flash)",
+    },
     "gemini-3.5-flash": {
         "mode": 1, "think": 4,
-        "desc": "Fast general-purpose model",
+        "desc": "Fast general-purpose (alias, backend routes to latest Flash)",
+    },
+    "gemini-3.8-flash-thinking": {
+        "mode": 2, "think": 0,
+        "desc": "Deep thinking (Gemini 3.8 Flash), longest output (~20k chars)",
     },
     "gemini-3.5-flash-thinking": {
         "mode": 2, "think": 0,
@@ -23,6 +31,10 @@ MODELS = {
     "gemini-auto": {
         "mode": 4, "think": 4,
         "desc": "Auto model selection",
+    },
+    "gemini-3.8-flash-thinking-lite": {
+        "mode": 5, "think": 0,
+        "desc": "Dynamic thinking with adaptive depth (Gemini 3.8 Flash)",
     },
     "gemini-3.5-flash-thinking-lite": {
         "mode": 5, "think": 0,
