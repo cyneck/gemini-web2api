@@ -6,3 +6,4 @@ cookie.json
 .env
 .idea
 .DS_Store
+gemini-auth.json

@@ -4,6 +4,7 @@ import time
 import uuid
 import re
 import urllib.request
+import urllib.error
 import urllib.parse
 import ssl
 import os
@@ -104,6 +105,16 @@ def _build_headers() -> dict:
     return headers
 
 
+def _apply_chat_persistence_flags(inner: list) -> None:
+    """Apply Gemini Web persistence flags to an outgoing request payload."""
+    if CONFIG.get("temporary_chats", False):
+        # Match Gemini Web temporary-chat requests.
+        inner[41] = [1]
+        inner[45] = 1
+    else:
+        inner[41] = [2]
+
+
 def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
     inner = [None] * 102
     if file_refs:
@@ -121,7 +132,7 @@ def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list 
     inner[18] = 0
     inner[27] = 1
     inner[30] = [4]
-    inner[41] = [2]
+    _apply_chat_persistence_flags(inner)
     inner[53] = 0
     inner[59] = str(uuid.uuid4())
     inner[61] = []
@@ -147,13 +158,47 @@ def _get_url() -> str:
     )
 
 
-def clean_text(text: str) -> str:
+def fetch_latest_bl() -> str:
+    """Fetch the current bard-web-server build label from gemini.google.com."""
+    try:
+        req = urllib.request.Request(
+            "https://gemini.google.com/app",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        ctx = _get_ssl_ctx()
+        proxy = CONFIG.get("proxy")
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+                urllib.request.HTTPSHandler(context=ctx))
+            resp = opener.open(req, timeout=15)
+        else:
+            resp = urllib.request.urlopen(req, context=ctx, timeout=15)
+        html = resp.read().decode("utf-8", errors="replace")
+        m = re.search(r'(boq_assistant-bard-web-server_\d+\.\d+_p\d+)', html)
+        if m:
+            return m.group(1)
+    except Exception as e:
+        log(f"BL auto-update fetch failed: {e}")
+    return None
+
+
+def update_bl_if_needed() -> bool:
+    """Fetch and update gemini_bl when Google rotates the frontend version."""
+    new_bl = fetch_latest_bl()
+    if new_bl and new_bl != CONFIG["gemini_bl"]:
+        log(f"BL auto-updated: {CONFIG['gemini_bl']} -> {new_bl}")
+        CONFIG["gemini_bl"] = new_bl
+        return True
+    return False
+
+
+def clean_text(text: str, strip: bool = True) -> str:
     text = re.sub(
         r'```(?:python|javascript|text)\?code_(?:reference|stdout)&code_event_index=\d+\n.*?```\n?',
         '', text, flags=re.DOTALL
     )
     text = re.sub(r'http://googleusercontent\.com/card_content/\d+\n?', '', text)
-    return text.strip()
+    return text.strip() if strip else text
 
 
 def _extract_texts_from_line(line: str) -> list:
@@ -181,6 +226,9 @@ def _extract_texts_from_line(line: str) -> list:
 
 def extract_response_text(raw: str) -> str:
     """Parse full response to get final text."""
+    bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', raw)
+    if bard_err:
+        raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]")
     last_text = ""
     for line in raw.split("\n"):
         for t in _extract_texts_from_line(line):
@@ -225,6 +273,15 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
             raw = resp.read().decode("utf-8", errors="replace")
             return extract_response_text(raw)
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code == 405 and update_bl_if_needed():
+                url = _get_url()
+                log("Retrying with updated BL...")
+                continue
+            if attempt < CONFIG["retry_attempts"] - 1:
+                log(f"Retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")
+                time.sleep(CONFIG["retry_delay_sec"])
         except Exception as e:
             last_err = e
             if attempt < CONFIG["retry_attempts"] - 1:
@@ -247,24 +304,41 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
     client = _get_httpx_client()
 
     last_err = None
+    emitted_raw_text = ""
     for attempt in range(CONFIG["retry_attempts"]):
         try:
-            prev_text = ""
             with client.stream("POST", url, content=body, headers=headers) as resp:
+                resp.raise_for_status()
                 buf = ""
                 for chunk in resp.iter_text():
                     buf += chunk
+                    if "BardErrorInfo" in buf:
+                        bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
+                        if bard_err:
+                            raise RuntimeError(
+                                f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]"
+                            )
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
                         for t in _extract_texts_from_line(line):
-                            if len(t) > len(prev_text):
-                                delta = clean_text(t[len(prev_text):])
-                                if delta:
-                                    yield delta
-                                prev_text = t
+                            if t == emitted_raw_text or emitted_raw_text.startswith(t):
+                                continue
+                            if not t.startswith(emitted_raw_text):
+                                raise RuntimeError("Gemini stream content changed during retry")
+                            delta = clean_text(t[len(emitted_raw_text):], strip=False)
+                            emitted_raw_text = t
+                            if delta:
+                                yield delta
             return
         except Exception as e:
             last_err = e
+            if HAS_HTTPX and hasattr(e, 'response') and getattr(e.response, 'status_code', 0) == 405:
+                if update_bl_if_needed():
+                    log("BL updated, falling back to non-streaming for this request")
+                    text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
+                    if text:
+                        yield text
+                    return
             if attempt < CONFIG["retry_attempts"] - 1:
                 log(f"Stream retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")
                 time.sleep(CONFIG["retry_delay_sec"])
