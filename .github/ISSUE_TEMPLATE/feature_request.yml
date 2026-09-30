@@ -1,0 +1,40 @@
+name: Feature request
+description: 建议一个新能力或改进
+title: "[Feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      description: 描述使用场景与当前的不便，而不是直接给方案
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的做法
+      description: 如果涉及新的配置项，请给出默认值建议
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及范围
+      options:
+        - 协议解析（解帧 / 字段映射）
+        - 账号与 Cookie 续签
+        - HTTP 端点与兼容性
+        - 控制台 /ui
+        - 部署（Docker / 反向代理）
+        - 文档与测试
+        - 其他
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过现有 Issue，确认不是重复建议
+          required: true

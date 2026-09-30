@@ -1,0 +1,69 @@
+name: 协议失效 / Protocol broken
+description: Gemini 网页端更新后请求开始失败（400/404/405、空回答、字段错乱）
+title: "[Protocol] "
+labels: ["protocol", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这是逆向项目最常见的故障类型。请尽量提供原始观测，而不是结论——**原始帧片段比"接口挂了"有用一百倍**。
+
+        ⚠️ 请先自行脱敏：不要粘贴完整 cookie、`SNlM0e`、api key。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: 症状
+      options:
+        - HTTP 400（cookie 可能被拒 / 载荷不匹配）
+        - HTTP 404（URL 或 bl 参数过期）
+        - HTTP 405（bl 参数过期）
+        - HTTP 429（被限流）
+        - 返回 200 但内容为空
+        - 文本正常但工具调用/图片/思考链丢失
+        - 流式中断或长时间无输出
+        - 其他（描述里说明）
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: 使用的模型名
+      placeholder: "gemini-3.6-flash"
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: 观测到的原始响应片段
+      description: 从日志或抓包中截取前几行原始帧（保留 `)]}'`、长度行、`wrb.fr` 结构）
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: last-known-good
+    attributes:
+      label: 最后一次正常的版本/时间
+      description: 有助于定位上游何时变更
+    validations:
+      required: false
+  - type: textarea
+    id: probe
+    attributes:
+      label: 你已经做过的排查
+      description: 例如是否换了账号、是否换了代理出口、`bl` 是否更新、控制台"测试"是否通过
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认粘贴的原始数据不含 cookie / token / api key 原文
+          required: true

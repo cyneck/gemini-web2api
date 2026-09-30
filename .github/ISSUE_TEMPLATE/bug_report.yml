@@ -1,0 +1,81 @@
+name: Bug report
+description: 报告可复现的功能缺陷（不是协议失效）
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认：
+        - 已经用 `main` 分支最新代码复现（`git pull` 后重启服务）
+        - **不要**粘贴 cookie、`xsrf_token`、api key 原文，日志请自行脱敏
+        - 如果是"上游协议变了导致请求失败"，请改用「协议失效」模板
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 来自 `/healthz` 的 version，或 `python -m gemini_web2api --version`
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: 运行方式
+      options:
+        - 直接运行 python -m gemini_web2api
+        - Docker / docker compose
+        - 反向代理后面
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: 系统与 Python 版本
+      placeholder: "Windows 11 / Python 3.12.4；或 Ubuntu 24.04 / Python 3.11"
+    validations:
+      required: true
+  - type: dropdown
+    id: endpoint
+    attributes:
+      label: 受影响的端点
+      options:
+        - /v1/chat/completions
+        - /v1/responses
+        - /v1beta/models/...:generateContent
+        - /v1beta/models/...:streamGenerateContent
+        - /ui 或 /api/*
+        - 启动 / 配置 / 多账号
+        - 其他（在描述里说明）
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 期望行为与实际行为分别是什么
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 尽量给最小复现（curl 命令、请求体片段、配置片段）
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（已脱敏）
+      description: 建议临时把 log_level 设为 debug、log_requests 打开后复现一次
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认日志中不包含 cookie / token / api key 原文
+          required: true

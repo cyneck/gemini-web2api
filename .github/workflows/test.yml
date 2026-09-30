@@ -1,0 +1,86 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is the declared floor in pyproject.toml, so it is tested for real.
+        python-version: ["3.8", "3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx
+
+      - name: Byte-compile every module
+        run: python -m compileall -q gemini_web2api gemini_web2api.py tests
+
+      - name: Lint (syntax + pyflakes level)
+        run: |
+          pip install "ruff==0.6.9"
+          ruff check --select E4,E7,E9,F --ignore F401 .
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Smoke test (boot the server and probe it)
+        run: |
+          python -m gemini_web2api --port 18081 --host 127.0.0.1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18081/healthz > /tmp/healthz.json; then break; fi
+            sleep 0.5
+          done
+          cat /tmp/healthz.json
+          python - <<'PY'
+          import json, urllib.request
+          health = json.load(urllib.request.urlopen("http://127.0.0.1:18081/healthz", timeout=5))
+          assert health["status"] == "ok", health
+          models = json.load(urllib.request.urlopen("http://127.0.0.1:18081/v1/models", timeout=5))
+          assert models["data"], models
+          print("smoke ok:", health["version"], len(models["data"]), "models")
+          PY
+          kill "$server_pid"
+
+  package:
+    name: build & install the wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Install and smoke the console script
+        run: |
+          pip install dist/*.whl
+          cd /tmp
+          gemini-web2api --version
+          gemini-web2api --help > /dev/null
+          python -c "import gemini_web2api, gemini_web2api.server, gemini_web2api.protocol; print('import ok', gemini_web2api.__version__)"
