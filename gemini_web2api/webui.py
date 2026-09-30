@@ -10,9 +10,10 @@ import re
 import time
 import urllib.error
 
-from .config import CONFIG, save_config, config_path, resolve_path, get_accounts, get_account
+from .config import (CONFIG, account_limit, config_path,
+                     get_accounts, resolve_path, save_config)
 from .models import MODELS, resolve_model
-from .gemini import generate, load_cookie, HAS_HTTPX
+from .gemini import HAS_HTTPX, forget_cookie_cache, generate, load_cookie
 from . import __version__
 
 # Every cookie found in the paste is forwarded, so these lists are only a
@@ -213,6 +214,14 @@ def _api_status(handler):
 _CONFIG_FIELDS = ["proxy", "default_model", "auth_user", "xsrf_token",
                   "gemini_bl", "log_requests", "request_timeout_sec",
                   "retry_attempts", "retry_delay_sec"]
+# Extra tunables exposed by the console. Every one of them is read through
+# config.get_int()/get_list(), so a bad value degrades to the safe default
+# instead of breaking request handling.
+_CONFIG_NUMERIC_FIELDS = ["stream_stall_timeout_sec", "max_request_body_bytes",
+                          "max_media_fetch_bytes", "image_fetch_timeout_sec",
+                          "cookie_rotation_min_interval_sec", "max_accounts"]
+_CONFIG_BOOL_FIELDS = ["emit_reasoning", "emit_generated_images", "cookie_rotation",
+                       "temporary_chats", "image_fetch_allow_private_hosts"]
 
 
 def _api_config(handler):
@@ -257,6 +266,27 @@ def _api_config(handler):
                 except (TypeError, ValueError):
                     handler.send_json({"error": f"{f} must be a number"}, 400)
                     return
+    for f in _CONFIG_NUMERIC_FIELDS:
+        if f in req:
+            try:
+                CONFIG[f] = int(req[f])
+            except (TypeError, ValueError):
+                handler.send_json({"error": f"{f} must be a number"}, 400)
+                return
+    for f in _CONFIG_BOOL_FIELDS:
+        if f in req:
+            CONFIG[f] = bool(req[f])
+    if "cors_origins" in req:
+        raw_origins = req["cors_origins"]
+        if raw_origins is None:
+            CONFIG["cors_origins"] = []
+        elif isinstance(raw_origins, str):
+            CONFIG["cors_origins"] = [o.strip() for o in raw_origins.split(",") if o.strip()]
+        elif isinstance(raw_origins, list):
+            CONFIG["cors_origins"] = [str(o).strip() for o in raw_origins if str(o).strip()]
+        else:
+            handler.send_json({"error": "cors_origins must be a list or a comma separated string"}, 400)
+            return
     try:
         saved = save_config()
     except RuntimeError as e:
@@ -355,6 +385,7 @@ def _api_cookie_save(handler):
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(parsed["cookie_str"] + "\n")
+    forget_cookie_cache(path)
     # A cookie without SNlM0e makes Gemini reject every request with 400, so
     # persist it right here instead of making the user save config separately.
     xsrf_saved = False
@@ -383,6 +414,7 @@ def _api_cookie_clear(handler):
     if os.path.exists(path):
         os.remove(path)
         removed = True
+    forget_cookie_cache(path)
     handler.send_json({"ok": True, "removed": removed, "anonymous": True})
 
 
@@ -438,6 +470,11 @@ def _api_accounts_save(handler):
 
     Parses the cookie and the xsrf_token independently: the paste may carry
     either, or both (page source usually contains SNlM0e).
+
+    Nothing is mutated until every input has been validated and the cookie file
+    has been written, so a rejected request can never leave a half-created
+    account behind (the old code appended first and validated afterwards, which
+    put a phantom account in /api/accounts that the next save persisted to disk).
     """
     req = _read_json_body(handler) or {}
     cookie_paste = str(req.get("cookie") or "")
@@ -466,24 +503,30 @@ def _api_accounts_save(handler):
                 return
 
     accts = get_accounts()
-    idx = req.get("idx")
-    if idx is None:
+    raw_idx = req.get("idx")
+    creating = raw_idx is None
+    if creating:
+        limit = account_limit()
+        if len(accts) >= limit:
+            handler.send_json({"error": f"账号数量已达上限 {limit}（可调大 max_accounts）"}, 400)
+            return
         acct = {"auth_user": auth_user if has_auth_user else None, "label": "",
                 "cookie_file": None, "xsrf_token": None, "enabled": True}
-        accts.append(acct)
-        idx = len(accts) - 1
+        idx = len(accts)
     else:
         try:
-            idx = int(idx)
+            idx = int(raw_idx)
         except (TypeError, ValueError):
             handler.send_json({"error": "idx 必须是数字"}, 400)
             return
         if not (0 <= idx < len(accts)):
             handler.send_json({"error": f"账号不存在：{idx}"}, 400)
             return
-        acct = accts[idx]
+        # Work on a copy so a later validation failure changes nothing.
+        acct = dict(accts[idx])
         if has_auth_user:
             acct["auth_user"] = auth_user
+
     if "label" in req:
         acct["label"] = str(req.get("label") or "").strip()
     if "enabled" in req:
@@ -491,33 +534,57 @@ def _api_accounts_save(handler):
     if xsrf:
         acct["xsrf_token"] = xsrf
 
-    cookie_saved = False
+    cookie_path = None
+    cookie_content = None
     if parsed["cookie_str"]:
         if parsed["missing"]:
             handler.send_json({"error": "缺少关键 cookie：" + ", ".join(parsed["missing"]),
                                "missing": parsed["missing"]}, 400)
             return
-        eff_user = auth_user if auth_user is not None else acct.get("auth_user")
-        path = (resolve_path(acct.get("cookie_file"))
-                or resolve_path(_default_cookie_name(eff_user)))
-        directory = os.path.dirname(os.path.abspath(path))
-        if directory and not os.path.isdir(directory):
-            os.makedirs(directory, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(parsed["cookie_str"] + "\n")
-        acct["cookie_file"] = path
-        cookie_saved = True
+        effective_user = auth_user if auth_user is not None else acct.get("auth_user")
+        cookie_path = (resolve_path(acct.get("cookie_file"))
+                       or resolve_path(_default_cookie_name(effective_user)))
+        cookie_content = parsed["cookie_str"] + "\n"
     elif cookie_paste.strip() and not parsed["xsrf"]:
         handler.send_json({"error": "没有解析到任何 cookie，也没找到 SNlM0e"}, 400)
         return
 
+    # ── every input is valid from here on: commit ──────────────────────────
+    previous_accounts = list(accts)
+    previous_active = CONFIG.get("active_account")
+    cookie_file_created = False
+    if cookie_path:
+        cookie_file_created = not os.path.exists(cookie_path)
+        try:
+            directory = os.path.dirname(os.path.abspath(cookie_path))
+            if directory and not os.path.isdir(directory):
+                os.makedirs(directory, exist_ok=True)
+            with open(cookie_path, "w", encoding="utf-8") as f:
+                f.write(cookie_content)
+        except OSError as error:
+            handler.send_json({"error": f"写入 cookie 文件失败：{error}"}, 500)
+            return
+        acct["cookie_file"] = cookie_path
+        forget_cookie_cache(cookie_path)
+
+    if creating:
+        accts.append(acct)
+    else:
+        accts[idx] = acct
     CONFIG["accounts"] = accts
     try:
         save_config()
     except RuntimeError as e:
+        CONFIG["accounts"] = previous_accounts
+        CONFIG["active_account"] = previous_active
+        if cookie_path and cookie_file_created:
+            try:
+                os.remove(cookie_path)
+            except OSError:
+                pass
         handler.send_json({"error": str(e)}, 400)
         return
-    handler.send_json({"ok": True, "idx": idx, "cookie_saved": cookie_saved,
+    handler.send_json({"ok": True, "idx": idx, "cookie_saved": bool(cookie_path),
                        "xsrf_saved": bool(xsrf)})
 
 
@@ -532,10 +599,12 @@ def _api_accounts_activate(handler):
     if not (0 <= idx < len(accts)):
         handler.send_json({"error": f"账号不存在：{idx}"}, 400)
         return
+    previous = CONFIG.get("active_account")
     CONFIG["active_account"] = idx
     try:
         save_config()
     except RuntimeError as e:
+        CONFIG["active_account"] = previous
         handler.send_json({"error": str(e)}, 400)
         return
     handler.send_json({"ok": True, "active_account": idx})
@@ -552,6 +621,8 @@ def _api_accounts_delete(handler):
     if not (0 <= idx < len(accts)):
         handler.send_json({"error": f"账号不存在：{idx}"}, 400)
         return
+    previous_accounts = list(accts)
+    previous_active = CONFIG.get("active_account")
     acct = accts.pop(idx)
     removed_file = False
     if req.get("remove_file"):
@@ -569,6 +640,8 @@ def _api_accounts_delete(handler):
     try:
         save_config()
     except RuntimeError as e:
+        CONFIG["accounts"] = previous_accounts
+        CONFIG["active_account"] = previous_active
         handler.send_json({"error": str(e)}, 400)
         return
     handler.send_json({"ok": True, "removed": True, "removed_file": removed_file,

@@ -2,8 +2,17 @@ services:
   gemini-web2api:
     build: .
     container_name: gemini-web2api
+    # 只映射到本机回环地址：容器内需要监听 0.0.0.0 才能被转发，但对外暴露由这里控制。
+    # 若要跨机访问，请改成 "8081:8081" 并务必配置 api_keys。
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     volumes:
-      - ./config.json:/app/config.json
+      - ./config.json:/config/config.json
+      - ./cookie.txt:/config/cookie.txt
+    environment:
+      # 通过环境变量覆盖任意配置项（也可只依赖 config.json）
+      GEMINI_WEB2API_CONFIG: /config/config.json
     restart: unless-stopped
+    # 容器以非 root 用户运行，无需额外权限
+    security_opt:
+      - no-new-privileges:true

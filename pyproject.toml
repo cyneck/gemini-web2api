@@ -1,14 +1,32 @@
 [project]
 name = "gemini-web2api"
-version = "1.1.0"
-description = "Convert Google Gemini web into OpenAI-compatible API"
+dynamic = ["version"]
+description = "Convert Google Gemini web into an OpenAI/Claude/Google compatible API"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
+keywords = ["gemini", "openai", "api", "proxy", "llm", "reverse-engineering"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Internet :: Proxy Servers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = []
 
 [project.optional-dependencies]
 streaming = ["httpx>=0.25"]
+dev = ["httpx>=0.25", "ruff==0.6.9"]
+
+[project.urls]
+Homepage = "https://github.com/cyneck/gemini-web2api"
+Issues = "https://github.com/cyneck/gemini-web2api/issues"
+Changelog = "https://github.com/cyneck/gemini-web2api/blob/main/CHANGELOG.md"
 
 [project.scripts]
 gemini-web2api = "gemini_web2api.__main__:main"
@@ -16,3 +34,30 @@ gemini-web2api = "gemini_web2api.__main__:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# The legacy single-file entry point is intentionally not packaged: it is only a
+# shim for people running `python gemini_web2api.py` from a checkout.
+packages = ["gemini_web2api"]
+py-modules = []
+
+[tool.setuptools.dynamic]
+version = {attr = "gemini_web2api.__version__"}
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+exclude = [".git", "__pycache__", "build", "dist"]
+
+[tool.ruff.lint]
+# Deliberately narrow: syntax errors plus pyflakes (undefined names, unused
+# imports/variables, shadowed builtins). Style and import-order rules can be
+# turned on later without failing every existing pull request.
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+  "E501",  # long lines are tolerated; formatting is not enforced repo-wide
+  "F401",  # re-exports (e.g. multimodal re-exporting netguard errors) are intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+"gemini_web2api.py" = ["E402"]  # shim adjusts sys.path before importing
