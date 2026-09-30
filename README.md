@@ -354,6 +354,42 @@ This tool reverse-engineers Google Gemini's web StreamGenerate protocol. It send
 
 The model selection is controlled by field `[79]` in the request payload, mapped from Gemini's frontend JavaScript source (`MODE_CATEGORY` enum).
 
+### Request parameters
+
+Requests go to `POST /_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate`
+with a form body of `f.req=<json>`, plus `at=<SNlM0e>` (the XSRF token) when a cookie is used.
+The `f.req` envelope is always `[null, "<inner json>"]`; `inner` is a sparse 102-element array.
+These are the slots that are actually populated (defaults from `gemini_web2api/gemini.py:_build_payload`):
+
+| Slot | Default | Meaning | Tunable? |
+| --- | --- | --- | --- |
+| `[0]` | `[prompt, 0, null, refs, null, null, 0]` | Conversation turn: `[0]` is the prompt, `[3]` holds uploaded file refs (`[[null,null,ref], ...]`) | Generated per request |
+| `[1]` | `["en"]` | UI language | Leave alone; express language preference in the prompt |
+| `[2]` | 10 empty strings/`null` | Conversation and UI state slot. Sent empty today, which is why every turn is a new chat (history IDs are not replayed -- see "Known gaps") | Needs a valid account to verify before touching |
+| `[6]` | `[0]` | Streaming-related flag | Leave alone |
+| `[7]` `[10]` `[11]` `[18]` `[27]` `[30]` `[53]` `[68]` | `1` / `0` / `[4]` etc. | Fixed frontend flags | Leave alone |
+| `[17]` | `[[think_mode]]` | Thinking depth (`0` deepest / `2` medium / `4` shallowest) | **Tunable**, see "Thinking Depth" |
+| `[41]` | `[2]`, or `[1]` for temporary chats | Chat persistence policy | Driven by `temporary_chats` |
+| `[45]` | `1` only for temporary chats | Temporary-chat marker | Same as above |
+| `[59]` | Fresh uuid4 each call | Request ID | Generated automatically; never reuse |
+| `[61]` | `[]` | Placeholder | Leave alone |
+| `[79]` | `model_id` | Model selection, from the frontend `MODE_CATEGORY` enum | **Tunable**, see "Available Models" |
+| `[31]` `[80]` | `2` / `3` | Used only by `gemini-3.1-pro-enhanced`; experimental enhanced output | Unverified experimental slot |
+
+URL query parameters:
+
+| Parameter | Meaning |
+| --- | --- |
+| `bl` | Frontend build label (`boq_assistant-bard-web-server_...`). When it drifts from what the site currently serves the request can be rejected (error code 1052); on failure the client re-fetches the current value and retries |
+| `hl` | Language |
+| `_reqid` | Timestamp-based request sequence number |
+| `rt` | Always `c` |
+
+Bottom line: **the only slots worth tuning are `[79]` (model) and `[17]` (thinking depth).**
+Everything else is a frontend placeholder or a structural constant -- changing it buys nothing and
+only makes the request look more abnormal. The `MODE_CATEGORY` enum is
+`1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE`.
+
 Response decoding is the delicate part, and lives in `gemini_web2api/protocol.py`:
 
 ```text

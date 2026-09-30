@@ -312,6 +312,41 @@ resp = client.chat.completions.create(
 
 逆向 Google Gemini 网页端的 StreamGenerate 协议, 将 OpenAI API 格式与 Gemini 内部 protobuf-like 格式互转. 模型选择通过请求 payload 的 `[79]` 字段控制, 映射自 Gemini 前端 JS 源码中的 `MODE_CATEGORY` 枚举.
 
+### 请求参数
+
+请求发往 `POST /_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate`，
+表单体是 `f.req=<json>`，带上 cookie 时再加 `at=<SNlM0e>`（XSRF 令牌）。
+`f.req` 的外壳固定为 `[null, "<inner json>"]`，`inner` 是一个长度 102 的稀疏数组，
+实际用到的槽位如下（默认值取自 `gemini_web2api/gemini.py:_build_payload`）：
+
+| 槽位 | 默认值 | 含义 | 可调性 |
+| --- | --- | --- | --- |
+| `[0]` | `[prompt, 0, null, refs, null, null, 0]` | 对话内容：`[0]` 是提示词，`[3]` 是上传文件引用（`[[null,null,ref], ...]`） | 由请求内容生成 |
+| `[1]` | `["en"]` | 界面语言 | 不建议改，语言偏好用提示词表达更稳定 |
+| `[2]` | 10 个空串/`null` | 会话与 UI 状态槽位。目前发空值，所以每轮都是新会话（历史 ID 未回放，见「已知缺口」） | 需要有效账号验证后才可动 |
+| `[6]` | `[0]` | 流式相关标志 | 保持默认 |
+| `[7]` `[10]` `[11]` `[18]` `[27]` `[30]` `[53]` `[68]` | `1` / `0` / `[4]` 等 | 前端固定标志位 | 保持默认 |
+| `[17]` | `[[think_mode]]` | 思考深度（`0` 最深 / `2` 中等 / `4` 最浅） | **可调**，见「思考深度」 |
+| `[41]` | `[2]`，临时会话为 `[1]` | 会话保存策略 | 由 `temporary_chats` 控制 |
+| `[45]` | 仅临时会话为 `1` | 临时会话标记 | 同上 |
+| `[59]` | 每次新 uuid4 | 请求 ID | 每次自动生成，不要复用 |
+| `[61]` | `[]` | 占位 | 保持默认 |
+| `[79]` | `model_id` | 模型选择，来自前端 `MODE_CATEGORY` 枚举 | **可调**，见「可用模型」 |
+| `[31]` `[80]` | `2` / `3` | 仅 `gemini-3.1-pro-enhanced` 使用，实验性增强输出 | 未验证的实验槽位 |
+
+URL 查询参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `bl` | 前端构建标签（`boq_assistant-bard-web-server_...`）。与站点当前版本不一致时请求可能被拒（错误码 1052），失败时会上网抓取最新值重试 |
+| `hl` | 语言 |
+| `_reqid` | 基于时间戳的请求序号 |
+| `rt` | 固定为 `c` |
+
+结论：**真正值得微调的只有 `[79]`（模型）与 `[17]`（思考深度）**，其余是前端占位或结构固定值，
+改动没有收益，只会增加被判定为异常请求的风险。`MODE_CATEGORY` 枚举为
+`1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE`。
+
 响应解码是最容易出错的部分，实现位于 `gemini_web2api/protocol.py`：
 
 ```text
