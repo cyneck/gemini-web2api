@@ -185,6 +185,7 @@ python -m gemini_web2api --config config.json
 | `image_fetch_allow_private_hosts` | `false` | 是否允许抓取内网图片地址（仅隔离网使用）。 |
 | `max_image_attachments` | `8` | 单次请求的图片数量上限。 |
 | `max_accounts` | `32` | 账号数量上限。 |
+| `client_socket_timeout_sec` | `300` | 连接在此时长内没有任何 socket 进展就断开（慢客户端防护）；`0` 表示关闭。 |
 | `cors_origins` | `[]` | 允许浏览器跨域调用的来源；留空表示仅同源。 |
 | `temporary_chats` | `false` | 使用临时会话，不写入账号历史。 |
 | `emit_reasoning` | `false` | 使用思考模型时额外返回思考链（`reasoning_content` / `thoughts`）。 |

@@ -1,5 +1,4 @@
 """URL safety checks and bounded downloads (SSRF hardening)."""
-import ipaddress
 import unittest
 import urllib.error
 from unittest import mock

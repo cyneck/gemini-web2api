@@ -15,7 +15,8 @@
 - **控制台 CSRF 防护**：`/api/*` 的状态变更请求要求同源且 `Content-Type: application/json`；CORS 改为按 `cors_origins` 白名单回显，不再无条件 `*`。
 - **`/healthz`** 健康检查端点（返回版本与模型数量），Dockerfile 增加 `HEALTHCHECK`。
 - **优雅退出**：`__main__` 捕获 SIGINT/SIGTERM，停止接收新请求并关闭连接池。
-- **新增配置项**：`log_level`、`stream_stall_timeout_sec`、`emit_reasoning`、`emit_generated_images`、`cookie_rotation`、`cookie_rotation_min_interval_sec`、`max_request_body_bytes`、`max_media_fetch_bytes`、`image_fetch_timeout_sec`、`image_fetch_allow_private_hosts`、`max_image_attachments`、`max_accounts`、`cors_origins`。
+- **慢客户端防护**：连接级 socket 超时 `client_socket_timeout_sec`（默认 300 秒，`0` 表示关闭）。此前客户端发出半个请求头后停住就能一直占住一个工作线程，几十个这类连接即可让 API 停止响应；该超时同时覆盖 SSE 写出，不再读数据的客户端会被断开而不是把线程钉死在写阻塞上。
+- **新增配置项**：`log_level`、`stream_stall_timeout_sec`、`client_socket_timeout_sec`、`emit_reasoning`、`emit_generated_images`、`cookie_rotation`、`cookie_rotation_min_interval_sec`、`max_request_body_bytes`、`max_media_fetch_bytes`、`image_fetch_timeout_sec`、`image_fetch_allow_private_hosts`、`max_image_attachments`、`max_accounts`、`cors_origins`。
 - **可观测性**：日志改为线程安全环形缓冲 + 分级过滤；401、413、流式失败都会记录；上游调用的返回行会带上响应字数、思考字数与图片数。
 - **测试**：新增协议解帧、候选解析、URL 安全、续签合并 `Set-Cookie`、请求体上限、控制台守卫、账号保存回滚、常数时间密钥比较等用例；CI 增加多 Python 版本测试、编译检查、ruff(pyflakes) 检查、启动自检与 wheel 构建安装验证。
 - **开源配套**：`SECURITY.md`、`CONTRIBUTING.md`、`CHANGELOG.md`、Issue 模板（缺陷 / 协议失效）、Dependabot。

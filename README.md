@@ -196,6 +196,7 @@ ones you are most likely to touch:
 | `image_fetch_allow_private_hosts` | `false` | Allow remote images from private/loopback ranges (only for isolated networks). |
 | `max_image_attachments` | `8` | Maximum images accepted per request. |
 | `max_accounts` | `32` | Maximum number of configured accounts. |
+| `client_socket_timeout_sec` | `300` | Drop a connection that makes no socket progress for this long (slow-client guard). `0` disables it. |
 | `cors_origins` | `[]` | Origins allowed to call the API from a browser. Empty means "same-origin only". |
 | `temporary_chats` | `false` | Use Gemini Web temporary chats instead of writing to account history. |
 | `emit_reasoning` | `false` | Also return the model's thinking (`reasoning_content` / `thoughts`) when a thinking model is used. |

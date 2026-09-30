@@ -43,7 +43,7 @@ jobs:
           ruff check --select E4,E7,E9,F --ignore F401 .
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -t . -v
 
       - name: Smoke test (boot the server and probe it)
         run: |

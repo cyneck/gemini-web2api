@@ -17,7 +17,7 @@ pip install -e ".[dev]"       # httpx + ruff
 ```bash
 python -m compileall -q gemini_web2api gemini_web2api.py tests
 ruff check --select E4,E7,E9,F --ignore F401 .
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -t . -v
 ```
 
 启动自检（改了 HTTP 层或配置时请手动跑一次）：

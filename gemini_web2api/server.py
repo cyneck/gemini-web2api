@@ -62,6 +62,24 @@ def _emit_images() -> bool:
     return bool(CONFIG.get("emit_generated_images", True))
 
 
+def _socket_timeout():
+    """Seconds of zero socket progress before the connection is dropped.
+
+    Returns None when disabled (config value 0), which is what
+    `socketserver` treats as "block forever". An unset or null field means
+    "use the default" rather than "disable" -- switching the guard off has to
+    be explicit, so a stray null cannot silently reopen the hole.
+    """
+    raw = CONFIG.get("client_socket_timeout_sec", 300)
+    if raw is None:
+        raw = 300
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        seconds = 300
+    return seconds if seconds > 0 else None
+
+
 def _upload_images(images: list) -> list:
     """Upload images and return their file references (None when there are none)."""
     if not images:
@@ -91,6 +109,20 @@ class GeminiHandler(BaseHTTPRequestHandler):
     server_version = f"gemini-web2api/{__version__}"
 
     # ─── logging / plumbing ──────────────────────────────────────────────────
+
+    def setup(self):
+        """Apply the slow-client guard before any bytes are read.
+
+        Without a socket timeout a client can open a connection, send half a
+        header line and hold a worker thread forever -- a handful of those
+        exhaust the thread pool and the API stops answering. The limit also
+        covers writes, so a reader that stops draining an SSE stream is dropped
+        rather than pinning a thread against a full socket buffer. Both are
+        "no progress for N seconds", far longer than the gap between streamed
+        deltas, so healthy clients are unaffected.
+        """
+        self.timeout = _socket_timeout()
+        BaseHTTPRequestHandler.setup(self)
 
     def log_message(self, fmt, *args):
         # Skip the console's own traffic: /ui page loads and /api/* polling would
@@ -537,18 +569,20 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": "empty input"}}, 400)
             return
 
-        captured = []
         try:
             file_refs = _upload_images(images)
-            text = generate(prompt, model_id, think_mode, file_refs, extra_fields,
-                            capture=captured)
+            # No capture= here on purpose: the Responses output schema has no
+            # slot for reasoning summaries or generated image URLs, and adding
+            # unknown item types risks breaking the CLI clients that parse this
+            # endpoint. Reasoning and images are reported by the other two
+            # endpoints instead.
+            text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
         except (RuntimeError, UnsafeURLError, ResponseTooLargeError) as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
-        result = captured[0] if captured else GenerationResult(text=text)
 
         tool_calls = None
         if tools and text and tool_choice != "none":

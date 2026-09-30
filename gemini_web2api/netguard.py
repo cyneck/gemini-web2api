@@ -179,7 +179,7 @@ def fetch_bytes(url, *, max_bytes, timeout=30, proxy=None, ssl_ctx=None,
     """
     opener = _build_opener(proxy=proxy, ssl_ctx=ssl_ctx)
     target = url
-    for hop in range(max_redirects + 1):
+    for _ in range(max_redirects + 1):
         validate_url(target, allow_private=allow_private)
         request = urllib.request.Request(target, headers={"User-Agent": user_agent})
         try:

@@ -27,5 +27,6 @@
   "image_fetch_allow_private_hosts": false,
   "max_image_attachments": 8,
   "max_accounts": 32,
+  "client_socket_timeout_sec": 300,
   "cors_origins": []
 }

@@ -58,6 +58,16 @@ class NumericConfigTests(ConfigTestCase):
         CONFIG["stream_stall_timeout_sec"] = 0
         self.assertEqual(get_int("stream_stall_timeout_sec"), 0)
 
+    def test_client_socket_timeout_may_be_disabled(self):
+        CONFIG["client_socket_timeout_sec"] = 0
+        self.assertEqual(get_int("client_socket_timeout_sec", 300), 0)
+
+    def test_client_socket_timeout_default_and_clamp(self):
+        CONFIG.pop("client_socket_timeout_sec", None)
+        self.assertEqual(get_int("client_socket_timeout_sec", 300), 300)
+        CONFIG["client_socket_timeout_sec"] = 10 ** 9      # absurd
+        self.assertLessEqual(get_int("client_socket_timeout_sec", 300), 3600)
+
 
 class ListConfigTests(ConfigTestCase):
     def test_list_is_returned_as_is(self):

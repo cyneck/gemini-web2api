@@ -651,7 +651,7 @@ def _api_accounts_delete(handler):
 def _api_test(handler):
     req = _read_json_body(handler)
     model = str(req.get("model") or CONFIG.get("default_model") or "gemini-3.5-flash")
-    cookie_str, sapisid = load_cookie()
+    cookie_str, _ = load_cookie()
     t0 = time.time()
     try:
         _, mode_id, think_mode, err, extra = resolve_model(model)

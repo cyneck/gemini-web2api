@@ -4,9 +4,8 @@ import unittest
 
 from gemini_web2api.protocol import (BardError, FrameDecoder, ProtocolFrameError,
                                      collect_candidates, decode_frame, iter_records,
-                                     parse_candidate, parse_payload,
-                                     parse_response_text, record_error_code,
-                                     record_payload)
+                                     parse_payload, parse_response_text,
+                                     record_error_code, record_payload)
 
 XSSI = ")]}'"
 

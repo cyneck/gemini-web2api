@@ -37,6 +37,9 @@ DEFAULT_CONFIG = {
     "cookie_rotation": True,
     "cookie_rotation_min_interval_sec": 60,
     "max_accounts": 32,
+    # Slow-client guard: drop a connection that makes no socket progress for
+    # this many seconds. 0 disables it, which is only safe on a trusted network.
+    "client_socket_timeout_sec": 300,
     # Cross-origin access is denied unless an origin is listed here.
     "cors_origins": [],
     # Multi-account: one Google account == one auth_user + one cookie + one
@@ -60,6 +63,7 @@ _NUMERIC_BOUNDS = {
     "max_image_attachments": (1, 64),
     "cookie_rotation_min_interval_sec": (0, 3600),
     "max_accounts": (1, 512),
+    "client_socket_timeout_sec": (0, 3600),
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
